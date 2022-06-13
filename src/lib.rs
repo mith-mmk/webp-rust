@@ -1,6 +1,115 @@
 type Error = Box<dyn std::error::Error>;
 use bin_rs::reader::BinaryReader;
 
+
+pub struct BitReader {
+    pub buffer: Vec<u8>,
+    ptr: usize,
+    left_bits: usize,
+    last_byte: u32,
+    warning:bool,
+}
+
+
+impl BitReader {
+    pub fn new(data:&[u8]) -> Self {
+        let this = Self {
+            buffer: data.to_vec(),
+            last_byte: 0,
+            ptr: 0,
+            left_bits: 0,
+            warning: false,
+        };
+        this
+    }
+
+
+    fn look_bits(&mut self,size:usize) -> Result<usize,Error> {
+        while self.left_bits <= 24 {
+            if self.ptr >= self.buffer.len() { 
+                if self.left_bits <= 8 && self.left_bits < size {
+                    self.warning = true;
+                    if size >=  12 {
+                        return Ok(0x1) // send EOL
+                    } else {
+                        return Ok(0x0)
+                    }
+                }
+            }
+
+            self.last_byte = (self.last_byte << 8) | (self.buffer[self.ptr] as u32);
+            self.ptr +=1;
+            self.left_bits += 8;
+        }
+
+        let bits = (self.last_byte >> (self.left_bits - size)) & ((1 << size) - 1);
+
+        Ok(bits as usize)
+    }
+
+    fn skip_bits(&mut self,size:usize) {
+        if self.left_bits > size {
+            self.left_bits -= size;
+        } else {
+            let r = self.look_bits(size);
+            if r.is_ok() {
+                self.left_bits -= size;
+            } else {
+                self.left_bits = 0;
+            }
+        }
+    }
+
+
+    fn get_bits(&mut self,size:usize) -> Result<usize,Error> {
+        let bits = self.look_bits(size);
+        self.skip_bits(size);
+        bits
+    }
+
+
+}
+
+
+// Paragraph 14.1
+const DC_TABLE: [u8;128] = [
+    4,     5,   6,   7,   8,   9,  10,  10,
+    11,   12,  13,  14,  15,  16,  17,  17,
+    18,   19,  20,  20,  21,  21,  22,  22,
+    23,   23,  24,  25,  25,  26,  27,  28,
+    29,   30,  31,  32,  33,  34,  35,  36,
+    37,   37,  38,  39,  40,  41,  42,  43,
+    44,   45,  46,  46,  47,  48,  49,  50,
+    51,   52,  53,  54,  55,  56,  57,  58,
+    59,   60,  61,  62,  63,  64,  65,  66,
+    67,   68,  69,  70,  71,  72,  73,  74,
+    75,   76,  76,  77,  78,  79,  80,  81,
+    82,   83,  84,  85,  86,  87,  88,  89,
+    91,   93,  95,  96,  98, 100, 101, 102,
+    104, 106, 108, 110, 112, 114, 116, 118,
+    122, 124, 126, 128, 130, 132, 134, 136,
+    138, 140, 143, 145, 148, 151, 154, 157
+];
+
+const AC_TABLE: [u16;128] = [
+    4,     5,   6,   7,   8,   9,  10,  11,
+    12,   13,  14,  15,  16,  17,  18,  19,
+    20,   21,  22,  23,  24,  25,  26,  27,
+    28,   29,  30,  31,  32,  33,  34,  35,
+    36,   37,  38,  39,  40,  41,  42,  43,
+    44,   45,  46,  47,  48,  49,  50,  51,
+    52,   53,  54,  55,  56,  57,  58,  60,
+    62,   64,  66,  68,  70,  72,  74,  76,
+    78,   80,  82,  84,  86,  88,  90,  92,
+    94,   96,  98, 100, 102, 104, 106, 108,
+    110, 112, 114, 116, 119, 122, 125, 128,
+    131, 134, 137, 140, 143, 146, 149, 152,
+    155, 158, 161, 164, 167, 170, 173, 177,
+    181, 185, 189, 193, 197, 201, 205, 209,
+    213, 217, 221, 225, 229, 234, 239, 245,
+    249, 254, 259, 264, 269, 274, 279, 284
+];
+
 pub fn read_chunkid<B:BinaryReader>(reader:&mut B) -> Result<String,Error> {
 
     let id = reader.read_ascii_string(4)?;
@@ -78,7 +187,7 @@ pub fn read_u24<B:BinaryReader>(reader:&mut B) -> Result<u32,Error> {
     Ok(val)
 }
 
-
+// RIFF Decode
 pub fn read_header<B:BinaryReader>(reader:&mut B)-> Result<WebpHeader,Error>  {
     let riff = reader.read_ascii_string(4)?;
     if riff != "RIFF" {
@@ -104,8 +213,44 @@ pub fn read_header<B:BinaryReader>(reader:&mut B)-> Result<WebpHeader,Error>  {
                 println!("This is Lossy");
                 webp_header.lossy = true;
                 webp_header.image_chunksize = size;
+                // Pragraph 9.1 Uncompressed Data Chunk
                 let buf = reader.read_bytes_as_vec(size)?;
+                let flags = buf[0] as usize | ((buf[1] as usize) << 8) | ((buf[2] as usize) << 8);
+                let key_flame = if flags & 0x0001 == 0 {true} else {false};
+                let profile = (flags >> 1) & 0x0007;
+                let show = if (flags >> 4) & 0x0001 == 1 {true} else {false};
+                let length = flags >> 5;
+                // flags
+                println!("key {} profile {} show {}",key_flame,profile,show);
+                println!("length {}",length);
+                // magic number 0x9d 0x01 0x2a
+                println!("{:02x} {:02x} {:02x}",buf[3],buf[4],buf[5]);
+                // width
+                let w = buf[6] as usize | ((buf[7] as usize) << 8);
+                let width = w & 0x3fff;
+                let w_scale = w >> 14;
+                println!("{} {}",width,w_scale);
+                // height
+                let w = buf[8] as usize | ((buf[9] as usize) << 8);
+                let height = w & 0x3fff;
+                let h_scale = w >> 14;
+                println!("{} {}",height,h_scale);
+                // Pragraph 9.2 color Space and Pixel Type
+                let mut reader = BitReader::new(&buf[10..]);
+                let yuv = reader.get_bits(1)?;   // L(1)
+                let clamp = reader.get_bits(1)?; // L(1)
+
+                // Pragraph 9.3 Segment-Based Adjustments
+                // parse_segment_header
+                // Paragraph 9.4
+                // Paragraph 9.5
+
+                // Paragraph 9.6 Quantize
+                // idct
+
+                // Paragraph 13.2 / 13.3
                 webp_header.image = buf;
+                
             },
             "VP8L" => {
                 println!("This is Lossless");
