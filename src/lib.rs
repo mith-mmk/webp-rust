@@ -1,6 +1,8 @@
 type Error = Box<dyn std::error::Error>;
 use bin_rs::reader::BinaryReader;
 
+const MB_FEATURE_TREE_PROBS: usize = 3;
+const NUM_MB_SEGMENTS: usize = 4;
 
 pub struct BitReader {
     pub buffer: Vec<u8>,
@@ -65,6 +67,16 @@ impl BitReader {
         let bits = self.look_bits(size);
         self.skip_bits(size);
         bits
+    }
+
+    fn get_signed_bits(&mut self,size:usize) -> Result<isize,Error> {
+        let bits = self.get_bits(size - 1)? as isize;
+        let sign = self.get_bits(1)?;
+        if sign == 1 {
+            Ok(bits)
+        } else {
+            Ok(- bits)
+        }
     }
 
 
@@ -229,20 +241,60 @@ pub fn read_header<B:BinaryReader>(reader:&mut B)-> Result<WebpHeader,Error>  {
                 let w = buf[6] as usize | ((buf[7] as usize) << 8);
                 let width = w & 0x3fff;
                 let w_scale = w >> 14;
+                webp_header.width = width;
                 println!("{} {}",width,w_scale);
                 // height
                 let w = buf[8] as usize | ((buf[9] as usize) << 8);
                 let height = w & 0x3fff;
                 let h_scale = w >> 14;
+                webp_header.height = height;
                 println!("{} {}",height,h_scale);
                 // Pragraph 9.2 color Space and Pixel Type
                 let mut reader = BitReader::new(&buf[10..]);
-                let yuv = reader.get_bits(1)?;   // L(1)
-                let clamp = reader.get_bits(1)?; // L(1)
+                let (mut yuv,mut clamp) = (0,0);
+                if key_flame {
+                    yuv = reader.get_bits(1)?;   // L(1)
+                    clamp = reader.get_bits(1)?; // L(1)    
+                }
+                println!("{} {}",yuv,clamp);
 
                 // Pragraph 9.3 Segment-Based Adjustments
                 // parse_segment_header
+
+                let mut quant = [0_isize;NUM_MB_SEGMENTS];
+                let mut filter= [0_isize;NUM_MB_SEGMENTS];
+                let mut seg = [0_usize;MB_FEATURE_TREE_PROBS];
+
+                let segmentation_enabled = reader.get_bits(1)?;
+                let mut update_segment_feature_data = 0;
+                if segmentation_enabled == 1 {
+                    if segmentation_enabled == 1 {
+                        update_segment_feature_data = reader.get_bits(1)?; // L(1)    
+                        if reader.get_bits(1)? == 1 {   // update map data
+                            for s in 0..NUM_MB_SEGMENTS {
+                                quant[s] = if reader.get_bits(1)? == 1 {
+                                        reader.get_signed_bits(7)? // signed
+                                    } else {0};
+                              }
+                              for s in 0..NUM_MB_SEGMENTS {
+                                filter[s] = if reader.get_bits(1)? == 1 {
+                                    reader.get_signed_bits(6)? // signed
+                                } else {0};
+                              }
+                        }
+                    }
+                    if update_segment_feature_data == 1 {
+                        for s in 0..MB_FEATURE_TREE_PROBS {
+                            seg[s] = if reader.get_bits(1)? == 1 {
+                                reader.get_bits(8)? // signed
+                            } else {0};
+                        }
+                    }
+                }
+
+
                 // Paragraph 9.4
+                // ParseFilterHeader
                 // Paragraph 9.5
 
                 // Paragraph 9.6 Quantize
@@ -386,13 +438,4 @@ pub fn read_header<B:BinaryReader>(reader:&mut B)-> Result<WebpHeader,Error>  {
         cksize -= 8;
     }
     Ok(webp_header)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
 }
