@@ -43,12 +43,47 @@ pub struct ParsedWebp<'a> {
     pub alpha_header: Option<AlphaHeader>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationHeader {
+    pub background_color: u32,
+    pub loop_count: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedAnimationFrame<'a> {
+    pub frame_chunk: ChunkHeader,
+    pub x_offset: usize,
+    pub y_offset: usize,
+    pub width: usize,
+    pub height: usize,
+    pub duration: usize,
+    pub blend: bool,
+    pub dispose_to_background: bool,
+    pub image_chunk: ChunkHeader,
+    pub image_data: &'a [u8],
+    pub alpha_chunk: Option<ChunkHeader>,
+    pub alpha_data: Option<&'a [u8]>,
+    pub alpha_header: Option<AlphaHeader>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedAnimationWebp<'a> {
+    pub features: WebpFeatures,
+    pub riff_size: Option<usize>,
+    pub animation: AnimationHeader,
+    pub frames: Vec<ParsedAnimationFrame<'a>>,
+}
+
 fn read_le24(bytes: &[u8]) -> usize {
     bytes[0] as usize | ((bytes[1] as usize) << 8) | ((bytes[2] as usize) << 16)
 }
 
 fn read_le32(bytes: &[u8]) -> usize {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+}
+
+fn read_le16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 fn padded_payload_size(size: usize) -> usize {
@@ -282,5 +317,137 @@ pub fn parse_still_webp(data: &[u8]) -> Result<ParsedWebp<'_>, DecoderError> {
         alpha_chunk,
         alpha_data,
         alpha_header,
+    })
+}
+
+fn parse_animation_frame<'a>(
+    data: &'a [u8],
+    features: WebpFeatures,
+    chunk: ChunkHeader,
+    riff_limit: Option<usize>,
+) -> Result<ParsedAnimationFrame<'a>, DecoderError> {
+    if chunk.size < 16 {
+        return Err(DecoderError::Bitstream("ANMF chunk is too small"));
+    }
+
+    let header = &data[chunk.data_offset..chunk.data_offset + 16];
+    let x_offset = read_le24(&header[0..3]) * 2;
+    let y_offset = read_le24(&header[3..6]) * 2;
+    let width = read_le24(&header[6..9]) + 1;
+    let height = read_le24(&header[9..12]) + 1;
+    let duration = read_le24(&header[12..15]);
+    let flags = header[15];
+    if flags >> 2 != 0 {
+        return Err(DecoderError::Bitstream("ANMF reserved bits must be zero"));
+    }
+    if x_offset + width > features.width || y_offset + height > features.height {
+        return Err(DecoderError::Bitstream(
+            "ANMF frame exceeds animation canvas",
+        ));
+    }
+
+    let mut offset = chunk.data_offset + 16;
+    let frame_limit = Some(chunk.data_offset + chunk.size);
+    let mut alpha_chunk = None;
+    let image_chunk;
+    loop {
+        let subchunk = parse_chunk(data, offset, frame_limit)?;
+        if &subchunk.fourcc == b"VP8 " || &subchunk.fourcc == b"VP8L" {
+            image_chunk = subchunk;
+            break;
+        }
+        if &subchunk.fourcc == b"ALPH" {
+            alpha_chunk = Some(subchunk);
+        }
+        offset += CHUNK_HEADER_SIZE + subchunk.padded_size;
+        if let Some(limit) = riff_limit {
+            if offset > limit {
+                return Err(DecoderError::Bitstream(
+                    "ANMF frame data exceeds RIFF payload",
+                ));
+            }
+        }
+    }
+
+    let image_data = &data[image_chunk.data_offset..image_chunk.data_offset + image_chunk.size];
+    let alpha_data = alpha_chunk
+        .map(|subchunk| &data[subchunk.data_offset..subchunk.data_offset + subchunk.size]);
+    let alpha_header = alpha_data.map(parse_alpha_header).transpose()?;
+
+    Ok(ParsedAnimationFrame {
+        frame_chunk: chunk,
+        x_offset,
+        y_offset,
+        width,
+        height,
+        duration,
+        blend: (flags & 0x02) == 0,
+        dispose_to_background: (flags & 0x01) != 0,
+        image_chunk,
+        image_data,
+        alpha_chunk,
+        alpha_data,
+        alpha_header,
+    })
+}
+
+pub fn parse_animation_webp(data: &[u8]) -> Result<ParsedAnimationWebp<'_>, DecoderError> {
+    let (riff_size, mut offset) = parse_riff(data)?;
+    let riff_limit = riff_size.map(|size| size + CHUNK_HEADER_SIZE);
+
+    let (vp8x, next_offset) = parse_vp8x(data, offset)?;
+    offset = next_offset;
+    let vp8x = vp8x.ok_or(DecoderError::Bitstream("animated WebP requires VP8X"))?;
+    if (vp8x.flags & ANIMATION_FLAG) == 0 {
+        return Err(DecoderError::Unsupported("animated WebP flag is not set"));
+    }
+
+    let anim_chunk = parse_chunk(data, offset, riff_limit)?;
+    if &anim_chunk.fourcc != b"ANIM" {
+        return Err(DecoderError::Bitstream("missing ANIM chunk"));
+    }
+    if anim_chunk.size != 6 {
+        return Err(DecoderError::Bitstream("wrong ANIM chunk size"));
+    }
+    let animation = AnimationHeader {
+        background_color: u32::from_le_bytes(
+            data[anim_chunk.data_offset..anim_chunk.data_offset + 4]
+                .try_into()
+                .unwrap(),
+        ),
+        loop_count: read_le16(&data[anim_chunk.data_offset + 4..anim_chunk.data_offset + 6]),
+    };
+    offset += CHUNK_HEADER_SIZE + anim_chunk.padded_size;
+
+    let features = WebpFeatures {
+        width: vp8x.canvas_width,
+        height: vp8x.canvas_height,
+        has_alpha: (vp8x.flags & ALPHA_FLAG) != 0,
+        has_animation: true,
+        format: WebpFormat::Undefined,
+        vp8x: Some(vp8x),
+    };
+
+    let limit = riff_limit.unwrap_or(data.len());
+    let mut frames = Vec::new();
+    while offset + CHUNK_HEADER_SIZE <= limit {
+        let chunk = parse_chunk(data, offset, riff_limit)?;
+        if &chunk.fourcc != b"ANMF" {
+            break;
+        }
+        let frame = parse_animation_frame(data, features, chunk, riff_limit)?;
+        frames.push(frame);
+        offset += CHUNK_HEADER_SIZE + chunk.padded_size;
+    }
+
+    if frames.is_empty() {
+        return Err(DecoderError::Bitstream("animated WebP has no ANMF frames"));
+    }
+
+    Ok(ParsedAnimationWebp {
+        features,
+        riff_size,
+        animation,
+        frames,
     })
 }

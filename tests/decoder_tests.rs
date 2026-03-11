@@ -1,12 +1,12 @@
 use webp_rust::decoder::alpha::parse_alpha_header;
-use webp_rust::decoder::header::{get_features, parse_still_webp};
+use webp_rust::decoder::header::{get_features, parse_animation_webp, parse_still_webp};
 use webp_rust::decoder::vp8::{
     parse_lossy_headers, parse_macroblock_data, parse_macroblock_headers,
 };
 use webp_rust::decoder::WebpFormat;
 use webp_rust::decoder::{
-    decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba, decode_lossy_vp8_to_rgba,
-    decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba,
+    decode_animation_webp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba,
+    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba,
 };
 
 fn rgba_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -234,6 +234,82 @@ fn decode_lossless_vp8l_to_rgba_matches_container_decode() {
     let from_vp8l = decode_lossless_vp8l_to_rgba(parsed.image_data).unwrap();
 
     assert_eq!(from_vp8l, from_container);
+}
+
+#[test]
+fn parse_animation_webp_reads_sample_animation_metadata() {
+    let data = include_bytes!("../_testdata/sample_animation.webp");
+
+    let parsed = parse_animation_webp(data).unwrap();
+
+    assert_eq!(parsed.features.width, 1200);
+    assert_eq!(parsed.features.height, 1200);
+    assert!(parsed.features.has_alpha);
+    assert!(parsed.features.has_animation);
+    assert_eq!(parsed.animation.background_color, 0xffb5_eef8);
+    assert_eq!(parsed.animation.loop_count, 0);
+    assert_eq!(parsed.frames.len(), 7);
+    assert_eq!(parsed.frames[0].width, 1200);
+    assert_eq!(parsed.frames[0].height, 1200);
+    assert_eq!(parsed.frames[0].x_offset, 0);
+    assert_eq!(parsed.frames[0].y_offset, 0);
+    assert!(!parsed.frames[0].blend);
+    assert!(!parsed.frames[0].dispose_to_background);
+    assert_eq!(parsed.frames[1].x_offset, 428);
+    assert_eq!(parsed.frames[1].y_offset, 600);
+    assert_eq!(parsed.frames[1].width, 313);
+    assert_eq!(parsed.frames[1].height, 280);
+    assert!(parsed.frames[1].blend);
+    assert!(!parsed.frames[1].dispose_to_background);
+}
+
+#[test]
+fn decode_animation_webp_matches_reference_pixels() {
+    let data = include_bytes!("../_testdata/sample_animation.webp");
+
+    let animation = decode_animation_webp(data).unwrap();
+
+    assert_eq!(animation.width, 1200);
+    assert_eq!(animation.height, 1200);
+    assert_eq!(animation.loop_count, 0);
+    assert_eq!(animation.background_color, 0xffb5_eef8);
+    assert_eq!(animation.frames.len(), 7);
+
+    assert_rgba_close(
+        rgba_at(&animation.frames[0].rgba, animation.width, 556, 601),
+        [243, 222, 195, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[1].rgba, animation.width, 556, 601),
+        [201, 195, 169, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[2].rgba, animation.width, 250, 73),
+        [199, 247, 251, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[3].rgba, animation.width, 250, 73),
+        [200, 244, 248, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[4].rgba, animation.width, 668, 526),
+        [3, 0, 0, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[5].rgba, animation.width, 736, 739),
+        [3, 0, 0, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&animation.frames[6].rgba, animation.width, 568, 651),
+        [243, 222, 195, 255],
+        0,
+    );
 }
 
 #[test]
