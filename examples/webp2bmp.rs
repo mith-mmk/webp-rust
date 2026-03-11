@@ -30,7 +30,7 @@ fn animation_frame_path(prefix: &Path, index: usize) -> PathBuf {
     parent.join(format!("{stem}_{index:04}.bmp"))
 }
 
-pub fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
     let mut args = std::env::args_os().skip(1);
     let input = args
         .next()

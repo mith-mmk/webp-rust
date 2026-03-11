@@ -7,7 +7,7 @@ pub mod decoder;
 const MB_FEATURE_TREE_PROBS: usize = 3;
 const NUM_MB_SEGMENTS: usize = 4;
 
-pub struct BitReader {
+pub(crate) struct BitReader {
     pub buffer: Vec<u8>,
     ptr: usize,
     left_bits: usize,
@@ -101,7 +101,7 @@ const AC_TABLE: [u16; 128] = [
     209, 213, 217, 221, 225, 229, 234, 239, 245, 249, 254, 259, 264, 269, 274, 279, 284,
 ];
 
-pub fn read_chunkid<B: BinaryReader>(reader: &mut B) -> Result<String, Error> {
+pub(crate) fn read_chunkid<B: BinaryReader>(reader: &mut B) -> Result<String, Error> {
     let id = reader.read_ascii_string(4)?;
 
     Ok(id.to_string())
@@ -109,6 +109,13 @@ pub fn read_chunkid<B: BinaryReader>(reader: &mut B) -> Result<String, Error> {
 pub struct AnimationControl {
     pub backgroud_color: u32,
     pub loop_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBuffer {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
 }
 
 pub struct AnimationFrame {
@@ -174,6 +181,31 @@ pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     reader.read_bytes(&mut b)?;
     let val = (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16);
     Ok(val)
+}
+
+fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, Error> {
+    let features = decoder::get_features(data)?;
+    if features.has_animation {
+        return Err("animated WebP requires animation decoder API".into());
+    }
+
+    let image = match features.format {
+        decoder::WebpFormat::Lossy => decoder::decode_lossy_webp_to_rgba(data)?,
+        decoder::WebpFormat::Lossless => decoder::decode_lossless_webp_to_rgba(data)?,
+        decoder::WebpFormat::Undefined => return Err("unsupported WebP format".into()),
+    };
+
+    Ok(ImageBuffer {
+        width: image.width,
+        height: image.height,
+        rgba: image.rgba,
+    })
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn image_from_file(filename: String) -> Result<ImageBuffer, Error> {
+    let data = std::fs::read(filename)?;
+    image_from_bytes(&data)
 }
 
 fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {

@@ -113,3 +113,19 @@ fn read_header_keeps_animation_frame_alpha_payload() {
     assert_eq!(frame.frame, parsed.image_data);
     assert_eq!(frame.alpha.as_deref(), Some(alph_payload.as_slice()));
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn image_from_file_decodes_still_webp() {
+    let sample = include_bytes!("../_testdata/sample.webp");
+    let path = std::env::temp_dir().join(format!("webp-rust-{}-sample.webp", std::process::id()));
+    std::fs::write(&path, sample).unwrap();
+
+    let image = webp_rust::image_from_file(path.to_string_lossy().into_owned()).unwrap();
+
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(image.width, 1920);
+    assert_eq!(image.height, 1080);
+    assert_eq!(&image.rgba[..4], &[177, 147, 189, 255]);
+}
