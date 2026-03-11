@@ -1,11 +1,9 @@
-use webp_rust::read_header;
 use std::fs::File;
 use std::io::prelude::*;
+use webp_rust::read_header;
 type Error = Box<dyn std::error::Error>;
 
-
-
-pub fn main() -> Result<(),Error>{
+pub fn main() -> Result<(), Error> {
     let mut file = File::open("./_testdata/sample.webp")?;
     let mut buf = vec![];
     file.read_to_end(&mut buf)?;

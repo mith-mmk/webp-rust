@@ -1,0 +1,44 @@
+pub mod alpha;
+pub mod header;
+pub mod lossy;
+pub mod quant;
+pub mod tree;
+pub mod vp8;
+pub mod vp8i;
+
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
+pub use alpha::AlphaHeader;
+pub use header::{
+    get_features, parse_still_webp, ChunkHeader, ParsedWebp, Vp8xHeader, WebpFeatures,
+};
+pub use lossy::{
+    decode_lossy_vp8_to_bmp, decode_lossy_vp8_to_rgba, decode_lossy_webp_to_bmp,
+    decode_lossy_webp_to_rgba, DecodedImage,
+};
+pub use vp8::{
+    parse_lossy_headers, parse_macroblock_data, parse_macroblock_headers, LosslessInfo,
+    LossyHeader, MacroBlockData, MacroBlockDataFrame, MacroBlockHeaders,
+};
+pub use vp8i::WebpFormat;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderError {
+    InvalidParam(&'static str),
+    NotEnoughData(&'static str),
+    Bitstream(&'static str),
+    Unsupported(&'static str),
+}
+
+impl Display for DecoderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::InvalidParam(msg) => write!(f, "invalid parameter: {msg}"),
+            Self::NotEnoughData(msg) => write!(f, "not enough data: {msg}"),
+            Self::Bitstream(msg) => write!(f, "bitstream error: {msg}"),
+            Self::Unsupported(msg) => write!(f, "unsupported feature: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for DecoderError {}
