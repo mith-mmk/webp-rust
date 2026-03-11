@@ -13,8 +13,9 @@ pub use header::{
     get_features, parse_still_webp, ChunkHeader, ParsedWebp, Vp8xHeader, WebpFeatures,
 };
 pub use lossy::{
-    decode_lossy_vp8_to_bmp, decode_lossy_vp8_to_rgba, decode_lossy_webp_to_bmp,
-    decode_lossy_webp_to_rgba, DecodedImage,
+    decode_lossy_vp8_to_bmp, decode_lossy_vp8_to_rgba, decode_lossy_vp8_to_yuv,
+    decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba, decode_lossy_webp_to_yuv, DecodedImage,
+    DecodedYuvImage,
 };
 pub use vp8::{
     parse_lossy_headers, parse_macroblock_data, parse_macroblock_headers, LosslessInfo,

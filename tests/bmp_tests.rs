@@ -16,8 +16,8 @@ fn encode_bmp24_writes_bottom_up_bgr_rows() {
     assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 2);
     assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), 2);
     assert_eq!(u16::from_le_bytes(bmp[28..30].try_into().unwrap()), 24);
-    assert_eq!(u32::from_le_bytes(bmp[38..42].try_into().unwrap()), 0);
-    assert_eq!(u32::from_le_bytes(bmp[42..46].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(bmp[38..42].try_into().unwrap()), 3_780);
+    assert_eq!(u32::from_le_bytes(bmp[42..46].try_into().unwrap()), 3_780);
 
     assert_eq!(
         &bmp[54..70],

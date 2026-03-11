@@ -7,6 +7,7 @@ const FILE_HEADER_SIZE: usize = 14;
 const INFO_HEADER_SIZE: usize = 40;
 const BMP_HEADER_SIZE: usize = FILE_HEADER_SIZE + INFO_HEADER_SIZE;
 const BITS_PER_PIXEL: usize = 24;
+const PIXELS_PER_METER: u32 = 3_780;
 
 fn row_stride(width: usize) -> Result<usize, DecoderError> {
     let raw = width
@@ -56,6 +57,8 @@ pub fn encode_bmp24_from_rgba(
     bmp[26..28].copy_from_slice(&(1u16).to_le_bytes());
     bmp[28..30].copy_from_slice(&(BITS_PER_PIXEL as u16).to_le_bytes());
     bmp[34..38].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    bmp[38..42].copy_from_slice(&PIXELS_PER_METER.to_le_bytes());
+    bmp[42..46].copy_from_slice(&PIXELS_PER_METER.to_le_bytes());
 
     let mut dest_offset = BMP_HEADER_SIZE;
     let mut row = vec![0u8; stride];

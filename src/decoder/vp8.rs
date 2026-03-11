@@ -423,10 +423,10 @@ fn transform_wht(input: &[i16; 16]) -> [i16; 16] {
         let a1 = tmp[base + 1] + tmp[base + 2];
         let a2 = tmp[base + 1] - tmp[base + 2];
         let a3 = dc - tmp[base + 3];
-        out[i] = ((a0 + a1) >> 3) as i16;
-        out[4 + i] = ((a3 + a2) >> 3) as i16;
-        out[8 + i] = ((a0 - a1) >> 3) as i16;
-        out[12 + i] = ((a3 - a2) >> 3) as i16;
+        out[base] = ((a0 + a1) >> 3) as i16;
+        out[base + 1] = ((a3 + a2) >> 3) as i16;
+        out[base + 2] = ((a0 - a1) >> 3) as i16;
+        out[base + 3] = ((a3 - a2) >> 3) as i16;
     }
     out
 }

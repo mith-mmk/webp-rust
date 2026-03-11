@@ -99,7 +99,7 @@ fn parse_macroblock_data_reads_residual_coefficients() {
 }
 
 #[test]
-fn decode_lossy_webp_to_rgba_matches_reference_pixels_without_loop_filter() {
+fn decode_lossy_webp_to_rgba_matches_reference_pixels() {
     let data = include_bytes!("../_testdata/sample.webp");
 
     let image = decode_lossy_webp_to_rgba(data).unwrap();
@@ -112,59 +112,34 @@ fn decode_lossy_webp_to_rgba_matches_reference_pixels_without_loop_filter() {
         0,
     );
     assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 1, 0),
-        [177, 147, 189, 255],
-        0,
-    );
-    assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 2, 0),
-        [177, 147, 189, 255],
-        0,
-    );
-    assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 3, 0),
-        [177, 147, 189, 255],
-        0,
-    );
-    assert_rgba_close(
         rgba_at(&image.rgba, image.width, 960, 540),
-        [255, 165, 159, 255],
-        3,
-    );
-    assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 961, 540),
-        [255, 165, 159, 255],
-        3,
-    );
-    assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 960, 541),
-        [255, 164, 158, 255],
-        3,
+        [254, 169, 161, 255],
+        0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 0, 1079),
         [253, 190, 2, 255],
-        1,
+        0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 123, 456),
         [243, 179, 167, 255],
-        3,
+        0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 789, 321),
-        [222, 168, 177, 255],
-        3,
+        [222, 167, 181, 255],
+        0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 1000, 100),
         [183, 151, 196, 255],
-        3,
+        0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 42, 900),
         [254, 193, 4, 255],
-        3,
+        0,
     );
 }
 
@@ -180,27 +155,12 @@ fn decode_lossy_vp8_to_rgba_matches_container_decode() {
 }
 
 #[test]
-fn decode_lossy_webp_to_bmp_writes_bottom_up_pixels() {
+fn decode_lossy_webp_to_bmp_matches_reference_file() {
     let data = include_bytes!("../_testdata/sample.webp");
-
-    let image = decode_lossy_webp_to_rgba(data).unwrap();
     let bmp = decode_lossy_webp_to_bmp(data).unwrap();
+    let expected = include_bytes!("../_testdata/sample-right.bmp");
 
-    assert_eq!(&bmp[0..2], b"BM");
-    assert_eq!(u32::from_le_bytes(bmp[2..6].try_into().unwrap()), 6_220_854);
-    assert_eq!(u32::from_le_bytes(bmp[10..14].try_into().unwrap()), 54);
-    assert_eq!(i32::from_le_bytes(bmp[18..22].try_into().unwrap()), 1920);
-    assert_eq!(i32::from_le_bytes(bmp[22..26].try_into().unwrap()), 1080);
-    let bottom_left = rgba_at(&image.rgba, image.width, 0, image.height - 1);
-    let bottom_right = rgba_at(&image.rgba, image.width, image.width - 1, image.height - 1);
-    assert_eq!(
-        &bmp[54..57],
-        &[bottom_left[2], bottom_left[1], bottom_left[0]]
-    );
-    assert_eq!(
-        &bmp[54 + 5757..54 + 5760],
-        &[bottom_right[2], bottom_right[1], bottom_right[0]]
-    );
+    assert_eq!(bmp, expected);
 }
 
 #[test]
