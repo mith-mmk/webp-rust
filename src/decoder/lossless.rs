@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::bmp::encode_bmp24_from_rgba;
 use crate::decoder::header::parse_still_webp;
 use crate::decoder::lossy::DecodedImage;
 use crate::decoder::vp8::get_lossless_info;
@@ -940,11 +939,6 @@ pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, Decoder
     })
 }
 
-pub fn decode_lossless_vp8l_to_bmp(data: &[u8]) -> Result<Vec<u8>, DecoderError> {
-    let image = decode_lossless_vp8l_to_rgba(data)?;
-    encode_bmp24_from_rgba(image.width, image.height, &image.rgba)
-}
-
 pub fn decode_lossless_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let parsed = parse_still_webp(data)?;
     if parsed.features.format != WebpFormat::Lossless {
@@ -953,9 +947,4 @@ pub fn decode_lossless_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, Decoder
         ));
     }
     decode_lossless_vp8l_to_rgba(parsed.image_data)
-}
-
-pub fn decode_lossless_webp_to_bmp(data: &[u8]) -> Result<Vec<u8>, DecoderError> {
-    let image = decode_lossless_webp_to_rgba(data)?;
-    encode_bmp24_from_rgba(image.width, image.height, &image.rgba)
 }

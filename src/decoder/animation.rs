@@ -1,4 +1,3 @@
-use crate::bmp::encode_bmp24_from_rgba;
 use crate::decoder::header::{parse_animation_webp, ParsedAnimationFrame};
 use crate::decoder::lossless::decode_lossless_vp8l_to_rgba;
 use crate::decoder::lossy::{decode_lossy_vp8_frame_to_rgba, DecodedImage};
@@ -177,13 +176,4 @@ pub fn decode_animation_webp(data: &[u8]) -> Result<DecodedAnimation, DecoderErr
         loop_count: parsed.animation.loop_count,
         frames,
     })
-}
-
-pub fn decode_animation_webp_to_bmp_frames(data: &[u8]) -> Result<Vec<Vec<u8>>, DecoderError> {
-    let animation = decode_animation_webp(data)?;
-    animation
-        .frames
-        .iter()
-        .map(|frame| encode_bmp24_from_rgba(animation.width, animation.height, &frame.rgba))
-        .collect()
 }

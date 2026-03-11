@@ -11,22 +11,15 @@ pub mod vp8i;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 pub use alpha::{apply_alpha_plane, decode_alpha_plane, AlphaHeader};
-pub use animation::{
-    decode_animation_webp, decode_animation_webp_to_bmp_frames, DecodedAnimation,
-    DecodedAnimationFrame,
-};
+pub use animation::{decode_animation_webp, DecodedAnimation, DecodedAnimationFrame};
 pub use header::{
     get_features, parse_animation_webp, parse_still_webp, AnimationHeader, ChunkHeader,
     ParsedAnimationFrame, ParsedAnimationWebp, ParsedWebp, Vp8xHeader, WebpFeatures,
 };
-pub use lossless::{
-    decode_lossless_vp8l_to_bmp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_bmp,
-    decode_lossless_webp_to_rgba,
-};
+pub use lossless::{decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba};
 pub use lossy::{
-    decode_lossy_vp8_to_bmp, decode_lossy_vp8_to_rgba, decode_lossy_vp8_to_yuv,
-    decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba, decode_lossy_webp_to_yuv, DecodedImage,
-    DecodedYuvImage,
+    decode_lossy_vp8_to_rgba, decode_lossy_vp8_to_yuv, decode_lossy_webp_to_rgba,
+    decode_lossy_webp_to_yuv, DecodedImage, DecodedYuvImage,
 };
 pub use vp8::{
     parse_lossy_headers, parse_macroblock_data, parse_macroblock_headers, LosslessInfo,

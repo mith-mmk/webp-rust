@@ -1,4 +1,3 @@
-use crate::bmp::encode_bmp24_from_rgba;
 use crate::decoder::alpha::{apply_alpha_plane, decode_alpha_plane};
 use crate::decoder::header::parse_still_webp;
 use crate::decoder::vp8::{parse_macroblock_data, FilterType, MacroBlockData, MacroBlockDataFrame};
@@ -1390,11 +1389,6 @@ pub(crate) fn decode_lossy_vp8_frame_to_rgba(
     Ok(image)
 }
 
-pub fn decode_lossy_vp8_to_bmp(data: &[u8]) -> Result<Vec<u8>, DecoderError> {
-    let image = decode_lossy_vp8_to_rgba(data)?;
-    encode_bmp24_from_rgba(image.width, image.height, &image.rgba)
-}
-
 pub fn decode_lossy_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let parsed = parse_still_webp(data)?;
     if parsed.features.format != WebpFormat::Lossy {
@@ -1416,11 +1410,6 @@ pub fn decode_lossy_webp_to_yuv(data: &[u8]) -> Result<DecodedYuvImage, DecoderE
         return Err(DecoderError::Unsupported("lossy alpha is not implemented"));
     }
     decode_lossy_vp8_to_yuv(parsed.image_data)
-}
-
-pub fn decode_lossy_webp_to_bmp(data: &[u8]) -> Result<Vec<u8>, DecoderError> {
-    let image = decode_lossy_webp_to_rgba(data)?;
-    encode_bmp24_from_rgba(image.width, image.height, &image.rgba)
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 type Error = Box<dyn std::error::Error>;
 use bin_rs::reader::{BinaryReader, BytesReader};
 
-pub mod bmp;
 pub mod decoder;
 
 const MB_FEATURE_TREE_PROBS: usize = 3;
@@ -101,11 +100,6 @@ const AC_TABLE: [u16; 128] = [
     209, 213, 217, 221, 225, 229, 234, 239, 245, 249, 254, 259, 264, 269, 274, 279, 284,
 ];
 
-pub(crate) fn read_chunkid<B: BinaryReader>(reader: &mut B) -> Result<String, Error> {
-    let id = reader.read_ascii_string(4)?;
-
-    Ok(id.to_string())
-}
 pub struct AnimationControl {
     pub backgroud_color: u32,
     pub loop_count: u16,
@@ -116,6 +110,20 @@ pub struct ImageBuffer {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
+}
+
+impl ImageBuffer {
+    pub fn get_width(self) -> usize {
+        self.width
+    }
+
+    pub fn get_height(self) -> usize {
+        self.height
+    }
+
+    pub fn buffer(self) -> Vec<u8> {
+        self.rgba.clone()
+    }
 }
 
 pub struct AnimationFrame {
@@ -183,16 +191,22 @@ pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     Ok(val)
 }
 
-fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, Error> {
+pub fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, decoder::DecoderError> {
     let features = decoder::get_features(data)?;
     if features.has_animation {
-        return Err("animated WebP requires animation decoder API".into());
+        return Err(decoder::DecoderError::Unsupported(
+            "animated WebP requires animation decoder API",
+        ));
     }
 
     let image = match features.format {
         decoder::WebpFormat::Lossy => decoder::decode_lossy_webp_to_rgba(data)?,
         decoder::WebpFormat::Lossless => decoder::decode_lossless_webp_to_rgba(data)?,
-        decoder::WebpFormat::Undefined => return Err("unsupported WebP format".into()),
+        decoder::WebpFormat::Undefined => {
+            return Err(decoder::DecoderError::Unsupported(
+                "unsupported WebP format",
+            ))
+        }
     };
 
     Ok(ImageBuffer {
@@ -205,7 +219,7 @@ fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, Error> {
 #[cfg(not(target_family = "wasm"))]
 pub fn image_from_file(filename: String) -> Result<ImageBuffer, Error> {
     let data = std::fs::read(filename)?;
-    image_from_bytes(&data)
+    Ok(image_from_bytes(&data)?)
 }
 
 fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {

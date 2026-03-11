@@ -7,7 +7,7 @@ use webp_rust::decoder::vp8i::{ALPHA_FLAG, ANIMATION_FLAG};
 use webp_rust::decoder::WebpFormat;
 use webp_rust::decoder::{
     decode_animation_webp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba,
-    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba,
+    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_rgba,
 };
 
 fn rgba_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -249,15 +249,6 @@ fn decode_lossy_vp8_to_rgba_matches_container_decode() {
     let from_vp8 = decode_lossy_vp8_to_rgba(parsed.image_data).unwrap();
 
     assert_eq!(from_vp8, from_container);
-}
-
-#[test]
-fn decode_lossy_webp_to_bmp_matches_reference_file() {
-    let data = include_bytes!("../_testdata/sample.webp");
-    let bmp = decode_lossy_webp_to_bmp(data).unwrap();
-    let expected = include_bytes!("../_testdata/sample-right.bmp");
-
-    assert_eq!(bmp, expected);
 }
 
 #[test]
