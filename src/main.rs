@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use webp_rust::decoder::decode_lossy_webp_to_bmp;
+use webp_rust::decoder::{
+    decode_lossless_webp_to_bmp, decode_lossy_webp_to_bmp, get_features, WebpFormat,
+};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -26,7 +28,12 @@ pub fn main() -> Result<(), Error> {
     });
 
     let data = fs::read(&input)?;
-    let bmp = decode_lossy_webp_to_bmp(&data)?;
+    let features = get_features(&data)?;
+    let bmp = match features.format {
+        WebpFormat::Lossy => decode_lossy_webp_to_bmp(&data)?,
+        WebpFormat::Lossless => decode_lossless_webp_to_bmp(&data)?,
+        WebpFormat::Undefined => return Err("animated or unsupported WebP format".into()),
+    };
 
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {

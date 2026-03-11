@@ -1,5 +1,6 @@
 pub mod alpha;
 pub mod header;
+pub mod lossless;
 pub mod lossy;
 pub mod quant;
 pub mod tree;
@@ -11,6 +12,10 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 pub use alpha::AlphaHeader;
 pub use header::{
     get_features, parse_still_webp, ChunkHeader, ParsedWebp, Vp8xHeader, WebpFeatures,
+};
+pub use lossless::{
+    decode_lossless_vp8l_to_bmp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_bmp,
+    decode_lossless_webp_to_rgba,
 };
 pub use lossy::{
     decode_lossy_vp8_to_bmp, decode_lossy_vp8_to_rgba, decode_lossy_vp8_to_yuv,

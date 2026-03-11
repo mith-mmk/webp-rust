@@ -5,7 +5,8 @@ use webp_rust::decoder::vp8::{
 };
 use webp_rust::decoder::WebpFormat;
 use webp_rust::decoder::{
-    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba,
+    decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba, decode_lossy_vp8_to_rgba,
+    decode_lossy_webp_to_bmp, decode_lossy_webp_to_rgba,
 };
 
 fn rgba_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -177,6 +178,62 @@ fn get_features_parses_minimal_lossless_webp() {
     assert_eq!(features.format, WebpFormat::Lossless);
     assert!(features.has_alpha);
     assert!(!features.has_animation);
+}
+
+#[test]
+fn decode_lossless_webp_to_rgba_matches_reference_pixels() {
+    let data = include_bytes!("../_testdata/sample_lossless.webp");
+
+    let image = decode_lossless_webp_to_rgba(data).unwrap();
+
+    assert_eq!(image.width, 1152);
+    assert_eq!(image.height, 896);
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 0, 0),
+        [23, 65, 103, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 576, 448),
+        [197, 156, 160, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 1151, 895),
+        [243, 183, 110, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 123, 456),
+        [30, 37, 53, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 789, 321),
+        [252, 192, 181, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 42, 800),
+        [35, 35, 43, 255],
+        0,
+    );
+    assert_rgba_close(
+        rgba_at(&image.rgba, image.width, 1000, 100),
+        [65, 56, 59, 255],
+        0,
+    );
+}
+
+#[test]
+fn decode_lossless_vp8l_to_rgba_matches_container_decode() {
+    let data = include_bytes!("../_testdata/sample_lossless.webp");
+    let parsed = parse_still_webp(data).unwrap();
+
+    let from_container = decode_lossless_webp_to_rgba(data).unwrap();
+    let from_vp8l = decode_lossless_vp8l_to_rgba(parsed.image_data).unwrap();
+
+    assert_eq!(from_vp8l, from_container);
 }
 
 #[test]
