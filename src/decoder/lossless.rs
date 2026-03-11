@@ -915,7 +915,9 @@ fn argb_to_rgba(argb: &[u32]) -> Vec<u8> {
     rgba
 }
 
-pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
+pub(crate) fn decode_lossless_vp8l_to_argb(
+    data: &[u8],
+) -> Result<(usize, usize, Vec<u32>), DecoderError> {
     let info = get_lossless_info(data)?;
     let bitstream = data
         .get(5..)
@@ -925,10 +927,15 @@ pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, Decoder
     if argb.len() != info.width * info.height {
         return Err(DecoderError::Bitstream("decoded VP8L image has wrong size"));
     }
+    Ok((info.width, info.height, argb))
+}
+
+pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
+    let (width, height, argb) = decode_lossless_vp8l_to_argb(data)?;
 
     Ok(DecodedImage {
-        width: info.width,
-        height: info.height,
+        width,
+        height,
         rgba: argb_to_rgba(&argb),
     })
 }

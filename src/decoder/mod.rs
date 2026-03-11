@@ -10,7 +10,7 @@ pub mod vp8i;
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-pub use alpha::AlphaHeader;
+pub use alpha::{apply_alpha_plane, decode_alpha_plane, AlphaHeader};
 pub use animation::{
     decode_animation_webp, decode_animation_webp_to_bmp_frames, DecodedAnimation,
     DecodedAnimationFrame,

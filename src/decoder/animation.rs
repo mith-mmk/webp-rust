@@ -1,7 +1,7 @@
 use crate::bmp::encode_bmp24_from_rgba;
 use crate::decoder::header::{parse_animation_webp, ParsedAnimationFrame};
 use crate::decoder::lossless::decode_lossless_vp8l_to_rgba;
-use crate::decoder::lossy::{decode_lossy_vp8_to_rgba, DecodedImage};
+use crate::decoder::lossy::{decode_lossy_vp8_frame_to_rgba, DecodedImage};
 use crate::decoder::DecoderError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,14 +117,7 @@ fn decode_frame_image(frame: &ParsedAnimationFrame<'_>) -> Result<DecodedImage, 
             }
             decode_lossless_vp8l_to_rgba(frame.image_data)?
         }
-        b"VP8 " => {
-            if frame.alpha_chunk.is_some() {
-                return Err(DecoderError::Unsupported(
-                    "VP8 animation frames with ALPH are not implemented",
-                ));
-            }
-            decode_lossy_vp8_to_rgba(frame.image_data)?
-        }
+        b"VP8 " => decode_lossy_vp8_frame_to_rgba(frame.image_data, frame.alpha_data)?,
         _ => return Err(DecoderError::Bitstream("unsupported animation frame chunk")),
     };
 

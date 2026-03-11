@@ -1,8 +1,9 @@
-use webp_rust::decoder::alpha::parse_alpha_header;
+use webp_rust::decoder::alpha::{decode_alpha_plane, parse_alpha_header};
 use webp_rust::decoder::header::{get_features, parse_animation_webp, parse_still_webp};
 use webp_rust::decoder::vp8::{
     parse_lossy_headers, parse_macroblock_data, parse_macroblock_headers,
 };
+use webp_rust::decoder::vp8i::{ALPHA_FLAG, ANIMATION_FLAG};
 use webp_rust::decoder::WebpFormat;
 use webp_rust::decoder::{
     decode_animation_webp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba,
@@ -25,6 +26,101 @@ fn assert_rgba_close(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
         );
     }
     assert_eq!(actual[3], expected[3]);
+}
+
+fn le24(value: usize) -> [u8; 3] {
+    [
+        (value & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        ((value >> 16) & 0xff) as u8,
+    ]
+}
+
+fn make_chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut chunk = Vec::with_capacity(8 + payload.len() + (payload.len() & 1));
+    chunk.extend_from_slice(fourcc);
+    chunk.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(payload);
+    if payload.len() & 1 == 1 {
+        chunk.push(0);
+    }
+    chunk
+}
+
+fn wrap_riff(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let riff_size = 4 + chunks.iter().map(Vec::len).sum::<usize>();
+    let mut data = Vec::with_capacity(8 + riff_size);
+    data.extend_from_slice(b"RIFF");
+    data.extend_from_slice(&(riff_size as u32).to_le_bytes());
+    data.extend_from_slice(b"WEBP");
+    for chunk in chunks {
+        data.extend_from_slice(chunk);
+    }
+    data
+}
+
+fn make_vp8x_payload(flags: u32, width: usize, height: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(10);
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&le24(width - 1));
+    payload.extend_from_slice(&le24(height - 1));
+    payload
+}
+
+fn make_alpha_plane(width: usize, height: usize) -> Vec<u8> {
+    let mut alpha = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            alpha[y * width + x] = ((x * 13 + y * 7 + (x ^ y)) & 0xff) as u8;
+        }
+    }
+    alpha
+}
+
+fn make_raw_alpha_chunk(alpha: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + alpha.len());
+    payload.push(0);
+    payload.extend_from_slice(alpha);
+    payload
+}
+
+fn make_lossy_alpha_still_webp(alpha: &[u8]) -> Vec<u8> {
+    let sample = include_bytes!("../_testdata/sample.webp");
+    let parsed = parse_still_webp(sample).unwrap();
+    let vp8x = make_chunk(
+        b"VP8X",
+        &make_vp8x_payload(ALPHA_FLAG, parsed.features.width, parsed.features.height),
+    );
+    let alph = make_chunk(b"ALPH", &make_raw_alpha_chunk(alpha));
+    let vp8 = make_chunk(b"VP8 ", parsed.image_data);
+    wrap_riff(&[vp8x, alph, vp8])
+}
+
+fn make_lossy_alpha_animation_webp(alpha: &[u8]) -> Vec<u8> {
+    let sample = include_bytes!("../_testdata/sample.webp");
+    let parsed = parse_still_webp(sample).unwrap();
+
+    let mut anmf_payload = Vec::new();
+    anmf_payload.extend_from_slice(&le24(0));
+    anmf_payload.extend_from_slice(&le24(0));
+    anmf_payload.extend_from_slice(&le24(parsed.features.width - 1));
+    anmf_payload.extend_from_slice(&le24(parsed.features.height - 1));
+    anmf_payload.extend_from_slice(&le24(100));
+    anmf_payload.push(0x02);
+    anmf_payload.extend_from_slice(&make_chunk(b"ALPH", &make_raw_alpha_chunk(alpha)));
+    anmf_payload.extend_from_slice(&make_chunk(b"VP8 ", parsed.image_data));
+
+    let vp8x = make_chunk(
+        b"VP8X",
+        &make_vp8x_payload(
+            ALPHA_FLAG | ANIMATION_FLAG,
+            parsed.features.width,
+            parsed.features.height,
+        ),
+    );
+    let anim = make_chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]);
+    let anmf = make_chunk(b"ANMF", &anmf_payload);
+    wrap_riff(&[vp8x, anim, anmf])
 }
 
 #[test]
@@ -237,6 +333,41 @@ fn decode_lossless_vp8l_to_rgba_matches_container_decode() {
 }
 
 #[test]
+fn decode_alpha_plane_extracts_green_channel_from_lossless_payload() {
+    let data = include_bytes!("../_testdata/sample_lossless.webp");
+    let parsed = parse_still_webp(data).unwrap();
+    let image = decode_lossless_webp_to_rgba(data).unwrap();
+
+    let mut alpha_data = Vec::with_capacity(1 + parsed.image_data.len());
+    alpha_data.push(0x01);
+    alpha_data.extend_from_slice(parsed.image_data);
+
+    let alpha = decode_alpha_plane(&alpha_data, image.width, image.height).unwrap();
+    let expected: Vec<u8> = image.rgba.chunks_exact(4).map(|pixel| pixel[1]).collect();
+
+    assert_eq!(alpha, expected);
+}
+
+#[test]
+fn decode_lossy_webp_to_rgba_applies_raw_alpha_chunk() {
+    let base = decode_lossy_webp_to_rgba(include_bytes!("../_testdata/sample.webp")).unwrap();
+    let alpha = make_alpha_plane(base.width, base.height);
+    let webp = make_lossy_alpha_still_webp(&alpha);
+
+    let image = decode_lossy_webp_to_rgba(&webp).unwrap();
+
+    assert_eq!(image.width, base.width);
+    assert_eq!(image.height, base.height);
+    for &(x, y) in &[(0usize, 0usize), (123, 456), (1919, 1079)] {
+        let expected_alpha = alpha[y * image.width + x];
+        let actual = rgba_at(&image.rgba, image.width, x, y);
+        let expected = rgba_at(&base.rgba, base.width, x, y);
+        assert_eq!(actual[0..3], expected[0..3]);
+        assert_eq!(actual[3], expected_alpha);
+    }
+}
+
+#[test]
 fn parse_animation_webp_reads_sample_animation_metadata() {
     let data = include_bytes!("../_testdata/sample_animation.webp");
 
@@ -310,6 +441,24 @@ fn decode_animation_webp_matches_reference_pixels() {
         [243, 222, 195, 255],
         0,
     );
+}
+
+#[test]
+fn decode_animation_webp_handles_lossy_alpha_frames() {
+    let base = decode_lossy_webp_to_rgba(include_bytes!("../_testdata/sample.webp")).unwrap();
+    let alpha = make_alpha_plane(base.width, base.height);
+    let webp = make_lossy_alpha_animation_webp(&alpha);
+
+    let animation = decode_animation_webp(&webp).unwrap();
+
+    assert_eq!(animation.frames.len(), 1);
+    for &(x, y) in &[(0usize, 0usize), (640, 360), (1919, 1079)] {
+        let expected_alpha = alpha[y * animation.width + x];
+        let actual = rgba_at(&animation.frames[0].rgba, animation.width, x, y);
+        let expected = rgba_at(&base.rgba, base.width, x, y);
+        assert_eq!(actual[0..3], expected[0..3]);
+        assert_eq!(actual[3], expected_alpha);
+    }
 }
 
 #[test]

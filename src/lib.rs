@@ -1,5 +1,5 @@
 type Error = Box<dyn std::error::Error>;
-use bin_rs::reader::BinaryReader;
+use bin_rs::reader::{BinaryReader, BytesReader};
 
 pub mod bmp;
 pub mod decoder;
@@ -120,6 +120,7 @@ pub struct AnimationFrame {
     pub alpha_blending: bool,
     pub disopse: bool,
     pub frame: Vec<u8>,
+    pub alpha: Option<Vec<u8>>,
 }
 
 pub struct WebpHeader {
@@ -175,6 +176,33 @@ pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     Ok(val)
 }
 
+fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
+    let mut reader = BytesReader::from_vec(data.to_vec());
+    let mut frame = None;
+    let mut alpha = None;
+
+    while (reader.offset()? as usize) + 8 <= data.len() {
+        let chunk_id = reader.read_ascii_string(4)?;
+        let size = reader.read_u32_le()? as usize;
+        let chunk = reader.read_bytes_as_vec(size)?;
+        match chunk_id.as_str() {
+            "ALPH" => alpha = Some(chunk),
+            "VP8 " | "VP8L" => {
+                frame = Some(chunk);
+                break;
+            }
+            _ => {}
+        }
+        if size & 1 == 1 && (reader.offset()? as usize) < data.len() {
+            reader.skip_ptr(1)?;
+        }
+    }
+
+    frame
+        .map(|frame| (frame, alpha))
+        .ok_or_else(|| Box::new(std::io::Error::from(std::io::ErrorKind::Other)) as Error)
+}
+
 // RIFF Decode
 pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error> {
     let riff = reader.read_ascii_string(4)?;
@@ -196,6 +224,7 @@ pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error>
         let vp8: &str = &reader.read_ascii_string(4)?;
         println!("{}", vp8);
         let size = reader.read_u32_le()? as usize;
+        let padded_size = size + (size & 1);
         match vp8 {
             "VP8 " => {
                 println!("This is Lossy");
@@ -353,10 +382,10 @@ pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error>
                     reader.skip_ptr(size)?;
                 }
             }
-            "ANIF" => {
+            "ANMF" | "ANIF" => {
                 if webp_header.has_animation == true {
-                    let frame_x = read_u24(reader)? as usize;
-                    let frame_y = read_u24(reader)? as usize;
+                    let frame_x = read_u24(reader)? as usize * 2;
+                    let frame_y = read_u24(reader)? as usize * 2;
                     let width = read_u24(reader)? as usize + 1;
                     let height = read_u24(reader)? as usize + 1;
                     let duration = read_u24(reader)? as usize;
@@ -365,6 +394,7 @@ pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error>
                     let disopse = if flag & 0x01 > 0 { true } else { false };
 
                     let buf = reader.read_bytes_as_vec(size - 16)?;
+                    let (frame, alpha) = parse_animation_frame_payload(&buf)?;
                     let animation_frame = AnimationFrame {
                         frame_x,
                         frame_y,
@@ -373,7 +403,8 @@ pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error>
                         duration,
                         alpha_blending,
                         disopse,
-                        frame: buf,
+                        frame,
+                        alpha,
                     };
                     if webp_header.animation_frame.as_ref().is_none() {
                         let frame = vec![animation_frame];
@@ -414,10 +445,13 @@ pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error>
                 reader.skip_ptr(size)?;
             }
         }
-        if cksize <= size + 8 {
+        if size & 1 == 1 {
+            reader.skip_ptr(1)?;
+        }
+        if cksize <= padded_size + 8 {
             break;
         }
-        cksize -= size;
+        cksize -= padded_size;
         cksize -= 8;
     }
     Ok(webp_header)
