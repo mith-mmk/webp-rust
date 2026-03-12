@@ -1,7 +1,7 @@
-//! webp-rust::decoder is rust native of Webp Image Decoder
-//! This library is based on the official WebP decoder in C, and it is implemented in Rust. It supports both lossy and lossless WebP formats, as well as animated WebP. The decoder can be used to decode WebP images into RGBA format, and it also provides functions to decode alpha planes and animation frames.
-
-//! Pure Rust WebP decoder.
+//! webp-rust is a pure Rust WebP decoder with a small lossless encoder.
+//! This library is based on the official WebP codec in C. It supports lossy
+//! and lossless WebP decode, animated WebP decode, and still-image lossless
+//! `VP8L` encode from RGBA input.
 //!
 //! The crate exposes a small top-level API for decoding still images to RGBA
 //! and a lower-level [`decoder`] module for container parsing and animation
@@ -12,6 +12,13 @@ use bin_rs::reader::{BinaryReader, BytesReader};
 
 /// Lower-level WebP parsing and decoding APIs.
 pub mod decoder;
+/// Lossless WebP encoder APIs.
+pub mod encoder;
+
+pub use encoder::{
+    encode_lossless_image_to_webp, encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_webp,
+    EncoderError,
+};
 
 const MB_FEATURE_TREE_PROBS: usize = 3;
 const NUM_MB_SEGMENTS: usize = 4;

@@ -1,10 +1,11 @@
 # webp-rust
 
-Pure Rust WebP decoder.
+Pure Rust WebP decoder and partial encoder.
 
 ## Status
 
 - Still image decode: `VP8` lossy, `VP8L` lossless
+- Still image encode: lossless `VP8L` from RGBA
 - Alpha: `ALPH` for lossy still images and lossy animation frames
 - Animation: compositing to RGBA frame sequence
 - Library output: RGBA only
@@ -33,6 +34,15 @@ For animation, use the decoder module directly:
 let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
 ```
+
+Lossless encoding:
+
+```rust
+let webp = webp_rust::encode_lossless_rgba_to_webp(width, height, &rgba)?;
+```
+
+Current encoder scope is still-image lossless only. Lossy encode and animated
+encode are not implemented.
 
 ## Example
 
