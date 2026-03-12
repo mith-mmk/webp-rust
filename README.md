@@ -69,7 +69,7 @@ let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif
 )?;
 
 let lossless_options = webp_rust::LosslessEncodingOptions {
-    optimization_level: 2,
+    optimization_level: 6,
 };
 let lossless = webp_rust::encoder::encode_lossless_image_to_webp_with_options_and_exif(
     &image,
@@ -109,7 +109,7 @@ This writes:
 Lossless:
 
 ```bash
-cargo run --example bmp2webp -- --opt-level 2 input.bmp output.webp
+cargo run --example bmp2webp -- --opt-level 6 input.bmp output.webp
 ```
 
 Lossy:
@@ -119,6 +119,9 @@ cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
 ```
 
 This default lossy path uses `-z 0` for fast encode speed.
+
+Lossless effort also accepts `-z 0..9`. `-z 6` is the balanced preset and
+`z7..9` enable progressively heavier search.
 
 Heavier lossy search:
 

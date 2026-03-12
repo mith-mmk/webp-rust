@@ -149,7 +149,7 @@ fn default_output_path(input: &Path) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run --example bmp2webp -- [-z N] [--lossy --quality 0..100 [--lossy-opt-level 0..9]] [--opt-level 0|1|2] <input.bmp> [output.webp]"
+    "usage: cargo run --example bmp2webp -- [-z 0..9] [--lossy --quality 0..100 [--lossy-opt-level 0..9]] [--opt-level 0..9] <input.bmp> [output.webp]"
 }
 
 fn parse_u8_level(value: &str, what: &str) -> Result<u8, Error> {
@@ -160,8 +160,8 @@ fn parse_u8_level(value: &str, what: &str) -> Result<u8, Error> {
 
 fn parse_optimization_level(value: &str) -> Result<u8, Error> {
     let level = parse_u8_level(value, "optimization level")?;
-    if level > 2 {
-        return Err(invalid_input("optimization level must be in 0..=2"));
+    if level > 9 {
+        return Err(invalid_input("optimization level must be in 0..=9"));
     }
     Ok(level)
 }
@@ -242,10 +242,10 @@ fn main() -> Result<(), Error> {
                 };
             }
         } else if !lossless_optimization_explicit {
-            options.optimization_level = if level <= 2 {
+            options.optimization_level = if level <= 9 {
                 level
             } else {
-                return Err(invalid_input("optimization level must be in 0..=2"));
+                return Err(invalid_input("optimization level must be in 0..=9"));
             };
         }
     }

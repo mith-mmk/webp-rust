@@ -120,14 +120,14 @@ fn encode_lossless_rgba_to_webp_rejects_invalid_optimization_level() {
         1,
         &[0, 0, 0, 0xff],
         &LosslessEncodingOptions {
-            optimization_level: 3,
+            optimization_level: 10,
         },
     )
     .unwrap_err();
 
     assert_eq!(
         error,
-        webp_rust::EncoderError::InvalidParam("lossless optimization level must be in 0..=2")
+        webp_rust::EncoderError::InvalidParam("lossless optimization level must be in 0..=9")
     );
 }
 
@@ -177,23 +177,23 @@ fn encode_lossless_higher_optimization_helps_repeated_tiles() {
         },
     )
     .unwrap();
-    let opt2 = encode_lossless_rgba_to_webp_with_options(
+    let opt6 = encode_lossless_rgba_to_webp_with_options(
         width,
         height,
         &rgba,
         &LosslessEncodingOptions {
-            optimization_level: 2,
+            optimization_level: 6,
         },
     )
     .unwrap();
 
     assert_eq!(decode(&opt0).unwrap().rgba, rgba);
-    assert_eq!(decode(&opt2).unwrap().rgba, rgba);
+    assert_eq!(decode(&opt6).unwrap().rgba, rgba);
     assert!(
-        opt2.len() < opt0.len(),
-        "expected opt2 to beat opt0 for repeated tiles: opt0={}, opt2={}",
+        opt6.len() < opt0.len(),
+        "expected opt6 to beat opt0 for repeated tiles: opt0={}, opt6={}",
         opt0.len(),
-        opt2.len()
+        opt6.len()
     );
 }
 

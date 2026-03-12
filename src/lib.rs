@@ -59,7 +59,7 @@ pub fn decode(data: &[u8]) -> Result<ImageBuffer, DecoderError> {
 
 fn to_lossless_options(optimize: usize) -> Result<LosslessEncodingOptions, EncoderError> {
     let optimization_level = u8::try_from(optimize)
-        .map_err(|_| EncoderError::InvalidParam("lossless optimization level must be in 0..=2"))?;
+        .map_err(|_| EncoderError::InvalidParam("lossless optimization level must be in 0..=9"))?;
     Ok(LosslessEncodingOptions { optimization_level })
 }
 
@@ -76,7 +76,7 @@ fn to_lossy_options(optimize: usize, quality: usize) -> Result<LossyEncodingOpti
 
 /// Encodes an image as a still WebP container.
 ///
-/// `optimize` is interpreted as `0..=2` for [`WebpEncoding::Lossless`] and
+/// `optimize` is interpreted as `0..=9` for [`WebpEncoding::Lossless`] and
 /// `0..=9` for [`WebpEncoding::Lossy`]. `quality` is used only for lossy
 /// encoding and must be in `0..=100`.
 ///
@@ -111,7 +111,7 @@ pub fn encode_lossy(
 
 /// Encodes an image as a still lossless WebP container.
 ///
-/// `optimize` must be in `0..=2`.
+/// `optimize` must be in `0..=9`.
 ///
 /// If `exif` is present it is embedded as a raw `EXIF` chunk.
 pub fn encode_lossless(

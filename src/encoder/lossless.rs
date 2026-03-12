@@ -16,7 +16,8 @@ const GLOBAL_PREDICTOR_TRANSFORM_BITS: usize = 9;
 const GLOBAL_PREDICTOR_MODE: u8 = 11;
 const CROSS_COLOR_TRANSFORM_BITS: usize = 5;
 const PREDICTOR_TRANSFORM_BITS: usize = 5;
-const MAX_OPTIMIZATION_LEVEL: u8 = 2;
+const MAX_OPTIMIZATION_LEVEL: u8 = 9;
+const DEFAULT_OPTIMIZATION_LEVEL: u8 = 6;
 const NUM_PREDICTOR_MODES: u8 = 14;
 const NUM_LITERAL_CODES: usize = 256;
 const NUM_LENGTH_CODES: usize = 24;
@@ -28,8 +29,13 @@ const NUM_HUFFMAN_BITS: usize = 3;
 const COLOR_CACHE_HASH_MUL: u32 = 0x1e35_a7bd;
 const MATCH_HASH_BITS: usize = 15;
 const MATCH_HASH_SIZE: usize = 1 << MATCH_HASH_BITS;
-const MATCH_CHAIN_DEPTH_LEVEL1: usize = 8;
-const MATCH_CHAIN_DEPTH_LEVEL2: usize = 32;
+const MATCH_CHAIN_DEPTH_LEVEL1: usize = 4;
+const MATCH_CHAIN_DEPTH_LEVEL2: usize = 8;
+const MATCH_CHAIN_DEPTH_LEVEL3: usize = 16;
+const MATCH_CHAIN_DEPTH_LEVEL4: usize = 32;
+const MATCH_CHAIN_DEPTH_LEVEL5: usize = 64;
+const MATCH_CHAIN_DEPTH_LEVEL6: usize = 128;
+const MATCH_CHAIN_DEPTH_LEVEL7: usize = 192;
 const MAX_FALLBACK_DISTANCE: usize = (1 << 20) - 120;
 const APPROX_LITERAL_COST_BITS: isize = 32;
 const APPROX_CACHE_COST_BITS: isize = 8;
@@ -127,21 +133,32 @@ struct HistogramCandidate {
     weight: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LosslessSearchProfile {
+    transform_search_level: u8,
+    match_search_level: u8,
+    entropy_search_level: u8,
+    use_color_cache: bool,
+    shortlist_keep: usize,
+    early_stop_ratio_percent: usize,
+}
+
 /// Lossless encoder tuning knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LosslessEncodingOptions {
-    /// Compression effort from `0` to `2`.
+    /// Compression effort from `0` to `9`.
     ///
-    /// - `0`: fast path with raw/subtract-green trials and no meta-huffman
-    /// - `1`: global transform search + capped color-cache search + light meta-huffman
-    /// - `2`: shortlisted global/tiled transform search + full color-cache/meta-huffman search
+    /// - `0`: fastest path, raw-only search
+    /// - `1..=3`: fast presets that should still beat PNG on typical images
+    /// - `4..=6`: balanced presets
+    /// - `7..=9`: increasingly heavy search, with `9` enabling the slowest trials
     pub optimization_level: u8,
 }
 
 impl Default for LosslessEncodingOptions {
     fn default() -> Self {
         Self {
-            optimization_level: MAX_OPTIMIZATION_LEVEL,
+            optimization_level: DEFAULT_OPTIMIZATION_LEVEL,
         }
     }
 }
@@ -201,10 +218,95 @@ fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), Encoder
 fn validate_options(options: &LosslessEncodingOptions) -> Result<(), EncoderError> {
     if options.optimization_level > MAX_OPTIMIZATION_LEVEL {
         return Err(EncoderError::InvalidParam(
-            "lossless optimization level must be in 0..=2",
+            "lossless optimization level must be in 0..=9",
         ));
     }
     Ok(())
+}
+
+fn lossless_search_profile(optimization_level: u8) -> LosslessSearchProfile {
+    match optimization_level {
+        0 => LosslessSearchProfile {
+            transform_search_level: 0,
+            match_search_level: 0,
+            entropy_search_level: 0,
+            use_color_cache: false,
+            shortlist_keep: 1,
+            early_stop_ratio_percent: 100,
+        },
+        1 => LosslessSearchProfile {
+            transform_search_level: 1,
+            match_search_level: 1,
+            entropy_search_level: 0,
+            use_color_cache: false,
+            shortlist_keep: 2,
+            early_stop_ratio_percent: 104,
+        },
+        2 => LosslessSearchProfile {
+            transform_search_level: 2,
+            match_search_level: 2,
+            entropy_search_level: 1,
+            use_color_cache: true,
+            shortlist_keep: 2,
+            early_stop_ratio_percent: 106,
+        },
+        3 => LosslessSearchProfile {
+            transform_search_level: 3,
+            match_search_level: 2,
+            entropy_search_level: 1,
+            use_color_cache: true,
+            shortlist_keep: 3,
+            early_stop_ratio_percent: 108,
+        },
+        4 => LosslessSearchProfile {
+            transform_search_level: 4,
+            match_search_level: 3,
+            entropy_search_level: 2,
+            use_color_cache: true,
+            shortlist_keep: 3,
+            early_stop_ratio_percent: 110,
+        },
+        5 => LosslessSearchProfile {
+            transform_search_level: 5,
+            match_search_level: 4,
+            entropy_search_level: 2,
+            use_color_cache: true,
+            shortlist_keep: 4,
+            early_stop_ratio_percent: 112,
+        },
+        6 => LosslessSearchProfile {
+            transform_search_level: 6,
+            match_search_level: 4,
+            entropy_search_level: 3,
+            use_color_cache: true,
+            shortlist_keep: 4,
+            early_stop_ratio_percent: 115,
+        },
+        7 => LosslessSearchProfile {
+            transform_search_level: 7,
+            match_search_level: 5,
+            entropy_search_level: 4,
+            use_color_cache: true,
+            shortlist_keep: 5,
+            early_stop_ratio_percent: 118,
+        },
+        8 => LosslessSearchProfile {
+            transform_search_level: 7,
+            match_search_level: 6,
+            entropy_search_level: 5,
+            use_color_cache: true,
+            shortlist_keep: 6,
+            early_stop_ratio_percent: 122,
+        },
+        _ => LosslessSearchProfile {
+            transform_search_level: 7,
+            match_search_level: 7,
+            entropy_search_level: 6,
+            use_color_cache: true,
+            shortlist_keep: 8,
+            early_stop_ratio_percent: 128,
+        },
+    }
 }
 
 fn rgba_has_alpha(rgba: &[u8]) -> bool {
@@ -711,8 +813,13 @@ fn build_palette_candidate(
     }))
 }
 
-fn build_global_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -> TransformPlan {
-    let cross_transform = estimate_cross_color_transform(subtract_green);
+fn build_global_cross_plan(
+    width: usize,
+    height: usize,
+    input: &[u32],
+    use_subtract_green: bool,
+) -> TransformPlan {
+    let cross_transform = estimate_cross_color_transform(input);
     let (cross_width, _cross_height, cross_transforms, cross_image) =
         make_uniform_cross_color_transform_image(
             width,
@@ -723,13 +830,13 @@ fn build_global_cross_plan(width: usize, height: usize, subtract_green: &[u32]) 
     let cross_colored = apply_cross_color_transform(
         width,
         height,
-        subtract_green,
+        input,
         GLOBAL_CROSS_COLOR_TRANSFORM_BITS,
         &cross_transforms,
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: Some(GLOBAL_CROSS_COLOR_TRANSFORM_BITS),
         cross_width,
         cross_image,
@@ -769,7 +876,8 @@ fn build_subtract_green_plan(subtract_green: &[u32]) -> TransformPlan {
 fn build_global_predictor_plan(
     width: usize,
     height: usize,
-    subtract_green: &[u32],
+    input: &[u32],
+    use_subtract_green: bool,
 ) -> TransformPlan {
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
         make_uniform_predictor_transform_image(
@@ -781,13 +889,13 @@ fn build_global_predictor_plan(
     let predicted = apply_predictor_transform(
         width,
         height,
-        subtract_green,
+        input,
         GLOBAL_PREDICTOR_TRANSFORM_BITS,
         &predictor_modes,
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: None,
         cross_width: 0,
         cross_image: Vec::new(),
@@ -801,9 +909,10 @@ fn build_global_predictor_plan(
 fn build_global_transform_plan(
     width: usize,
     height: usize,
-    subtract_green: &[u32],
+    input: &[u32],
+    use_subtract_green: bool,
 ) -> TransformPlan {
-    let cross_plan = build_global_cross_plan(width, height, subtract_green);
+    let cross_plan = build_global_cross_plan(width, height, input, use_subtract_green);
     let cross_colored = cross_plan.predicted.clone();
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
         make_uniform_predictor_transform_image(
@@ -821,7 +930,7 @@ fn build_global_transform_plan(
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: cross_plan.cross_bits,
         cross_width: cross_plan.cross_width,
         cross_image: cross_plan.cross_image,
@@ -832,19 +941,24 @@ fn build_global_transform_plan(
     }
 }
 
-fn build_tiled_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -> TransformPlan {
+fn build_tiled_cross_plan(
+    width: usize,
+    height: usize,
+    input: &[u32],
+    use_subtract_green: bool,
+) -> TransformPlan {
     let (cross_width, _cross_height, cross_transforms, cross_image) =
-        make_cross_color_transform_image(width, height, subtract_green);
+        make_cross_color_transform_image(width, height, input);
     let cross_colored = apply_cross_color_transform(
         width,
         height,
-        subtract_green,
+        input,
         CROSS_COLOR_TRANSFORM_BITS,
         &cross_transforms,
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: Some(CROSS_COLOR_TRANSFORM_BITS),
         cross_width,
         cross_image,
@@ -858,20 +972,21 @@ fn build_tiled_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -
 fn build_tiled_predictor_plan(
     width: usize,
     height: usize,
-    subtract_green: &[u32],
+    input: &[u32],
+    use_subtract_green: bool,
 ) -> TransformPlan {
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
-        make_predictor_transform_image(width, height, subtract_green);
+        make_predictor_transform_image(width, height, input);
     let predicted = apply_predictor_transform(
         width,
         height,
-        subtract_green,
+        input,
         PREDICTOR_TRANSFORM_BITS,
         &predictor_modes,
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: None,
         cross_width: 0,
         cross_image: Vec::new(),
@@ -885,9 +1000,10 @@ fn build_tiled_predictor_plan(
 fn build_tiled_transform_plan(
     width: usize,
     height: usize,
-    subtract_green: &[u32],
+    input: &[u32],
+    use_subtract_green: bool,
 ) -> TransformPlan {
-    let cross_plan = build_tiled_cross_plan(width, height, subtract_green);
+    let cross_plan = build_tiled_cross_plan(width, height, input, use_subtract_green);
     let cross_colored = cross_plan.predicted.clone();
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
         make_predictor_transform_image(width, height, &cross_colored);
@@ -900,7 +1016,7 @@ fn build_tiled_transform_plan(
     );
 
     TransformPlan {
-        use_subtract_green: true,
+        use_subtract_green,
         cross_bits: cross_plan.cross_bits,
         cross_width: cross_plan.cross_width,
         cross_image: cross_plan.cross_image,
@@ -911,40 +1027,185 @@ fn build_tiled_transform_plan(
     }
 }
 
+fn quick_token_build_options(profile: &LosslessSearchProfile) -> TokenBuildOptions {
+    token_build_options(profile.match_search_level.min(2), 0)
+}
+
+fn estimate_token_stream_cost_bytes(
+    width: usize,
+    argb: &[u32],
+    options: TokenBuildOptions,
+) -> Result<usize, EncoderError> {
+    let tokens = build_tokens(width, argb, options)?;
+    let histograms = build_histograms(&tokens, width, 0)?;
+    let group = build_group_codes(&histograms)?;
+    let extra_bits = tokens
+        .iter()
+        .map(|&token| match token {
+            Token::Literal(_) | Token::Cache(_) => 0usize,
+            Token::Copy { distance, length } => {
+                let plane_code = distance_to_plane_code(width, distance);
+                prefix_extra_bit_count(length) + prefix_extra_bit_count(plane_code)
+            }
+        })
+        .sum::<usize>();
+    let total_bits = histogram_cost(&histograms, &group) + extra_bits + tokens.len();
+    Ok(total_bits.div_ceil(8))
+}
+
+fn estimate_transform_plan_score(
+    width: usize,
+    plan: &TransformPlan,
+    profile: &LosslessSearchProfile,
+) -> Result<usize, EncoderError> {
+    let transform_options = TokenBuildOptions {
+        color_cache_bits: 0,
+        match_chain_depth: 0,
+        use_window_offsets: false,
+        window_offset_limit: 0,
+        lazy_matching: false,
+    };
+    let mut score = estimate_token_stream_cost_bytes(
+        width,
+        &plan.predicted,
+        quick_token_build_options(profile),
+    )?;
+    if plan.use_subtract_green {
+        score += 1;
+    }
+    if !plan.cross_image.is_empty() {
+        score += 2 + estimate_token_stream_cost_bytes(
+            plan.cross_width,
+            &plan.cross_image,
+            transform_options,
+        )?;
+    }
+    if !plan.predictor_image.is_empty() {
+        score += 2 + estimate_token_stream_cost_bytes(
+            plan.predictor_width,
+            &plan.predictor_image,
+            transform_options,
+        )?;
+    }
+    Ok(score)
+}
+
+fn collect_transform_plans(
+    width: usize,
+    height: usize,
+    argb: &[u32],
+    subtract_green: &[u32],
+    profile: &LosslessSearchProfile,
+) -> Vec<TransformPlan> {
+    let subtract_is_distinct = subtract_green != argb;
+    let mut plans = vec![build_raw_plan(argb)];
+
+    if subtract_is_distinct && profile.transform_search_level >= 1 {
+        plans.push(build_subtract_green_plan(subtract_green));
+    }
+    if profile.transform_search_level >= 2 {
+        plans.push(build_global_cross_plan(width, height, argb, false));
+        plans.push(build_global_predictor_plan(width, height, argb, false));
+    }
+    if subtract_is_distinct && profile.transform_search_level >= 3 {
+        plans.push(build_global_cross_plan(width, height, subtract_green, true));
+        plans.push(build_global_predictor_plan(
+            width,
+            height,
+            subtract_green,
+            true,
+        ));
+    }
+    if profile.transform_search_level >= 4 {
+        plans.push(build_global_transform_plan(width, height, argb, false));
+        if subtract_is_distinct {
+            plans.push(build_global_transform_plan(
+                width,
+                height,
+                subtract_green,
+                true,
+            ));
+        }
+    }
+    if profile.transform_search_level >= 5 {
+        plans.push(build_tiled_cross_plan(width, height, argb, false));
+        plans.push(build_tiled_predictor_plan(width, height, argb, false));
+    }
+    if subtract_is_distinct && profile.transform_search_level >= 6 {
+        plans.push(build_tiled_cross_plan(width, height, subtract_green, true));
+        plans.push(build_tiled_predictor_plan(
+            width,
+            height,
+            subtract_green,
+            true,
+        ));
+    }
+    if profile.transform_search_level >= 7 {
+        plans.push(build_tiled_transform_plan(width, height, argb, false));
+        if subtract_is_distinct {
+            plans.push(build_tiled_transform_plan(
+                width,
+                height,
+                subtract_green,
+                true,
+            ));
+        }
+    }
+
+    plans
+}
+
+fn shortlist_transform_plans(
+    width: usize,
+    plans: Vec<TransformPlan>,
+    profile: &LosslessSearchProfile,
+) -> Result<Vec<(usize, TransformPlan)>, EncoderError> {
+    let mut ranked = Vec::with_capacity(plans.len());
+    for plan in plans {
+        ranked.push((estimate_transform_plan_score(width, &plan, profile)?, plan));
+    }
+    ranked.sort_by_key(|(score, _)| *score);
+    ranked.truncate(profile.shortlist_keep.min(ranked.len()));
+    Ok(ranked)
+}
+
+fn should_stop_transform_search(
+    best_len: usize,
+    next_estimate: usize,
+    profile: &LosslessSearchProfile,
+) -> bool {
+    profile.early_stop_ratio_percent != usize::MAX
+        && next_estimate.saturating_mul(100)
+            >= best_len.saturating_mul(profile.early_stop_ratio_percent)
+}
+
 fn encode_transform_plan_to_vp8l(
     width: usize,
     height: usize,
     rgba: &[u8],
     plan: &TransformPlan,
-    optimization_level: u8,
-    use_color_cache: bool,
+    profile: &LosslessSearchProfile,
 ) -> Result<Vec<u8>, EncoderError> {
-    let no_cache_options = token_build_options(optimization_level, 0);
+    let no_cache_options = token_build_options(profile.match_search_level, 0);
     let mut best = encode_transform_plan_to_vp8l_with_cache(
         width,
         height,
         rgba,
         plan,
         no_cache_options,
-        optimization_level,
+        profile.entropy_search_level,
     )?;
-    if use_color_cache && plan.predicted.len() >= 64 {
+    if profile.use_color_cache && plan.predicted.len() >= 64 {
         let base_tokens = build_tokens(width, &plan.predicted, no_cache_options)?;
-        let best_cache_bits = select_best_color_cache_bits(
-            width,
-            height,
-            &plan.predicted,
-            &base_tokens,
-            max_color_cache_bits_for_level(optimization_level),
-            optimization_level,
-        )?;
+        let best_cache_bits =
+            select_best_color_cache_bits(width, height, &plan.predicted, &base_tokens, profile)?;
         let with_cache = encode_transform_plan_to_vp8l_with_cache(
             width,
             height,
             rgba,
             plan,
-            token_build_options(optimization_level, best_cache_bits),
-            optimization_level,
+            token_build_options(profile.match_search_level, best_cache_bits),
+            profile.entropy_search_level,
         )?;
         if best_cache_bits > 0 && with_cache.len() < best.len() {
             best = with_cache;
@@ -953,40 +1214,13 @@ fn encode_transform_plan_to_vp8l(
     Ok(best)
 }
 
-fn shortlist_transform_plans(
-    width: usize,
-    height: usize,
-    rgba: &[u8],
-    plans: Vec<TransformPlan>,
-    keep: usize,
-) -> Result<Vec<TransformPlan>, EncoderError> {
-    if plans.len() <= keep {
-        return Ok(plans);
-    }
-
-    let fast_options = token_build_options(0, 0);
-    let mut ranked = Vec::with_capacity(plans.len());
-    for plan in plans {
-        let size =
-            encode_transform_plan_to_vp8l_with_cache(width, height, rgba, &plan, fast_options, 0)?
-                .len();
-        ranked.push((size, plan));
-    }
-    ranked.sort_by_key(|(size, _)| *size);
-    Ok(ranked
-        .into_iter()
-        .take(keep)
-        .map(|(_, plan)| plan)
-        .collect())
-}
-
 fn encode_transform_plan_to_vp8l_with_cache(
     width: usize,
     height: usize,
     rgba: &[u8],
     plan: &TransformPlan,
     token_options: TokenBuildOptions,
-    optimization_level: u8,
+    entropy_search_level: u8,
 ) -> Result<Vec<u8>, EncoderError> {
     let transform_options = TokenBuildOptions {
         color_cache_bits: 0,
@@ -1037,7 +1271,7 @@ fn encode_transform_plan_to_vp8l_with_cache(
         width,
         &plan.predicted,
         true,
-        optimization_level,
+        entropy_search_level,
         token_options,
     )?;
 
@@ -1053,8 +1287,7 @@ fn encode_palette_candidate_to_vp8l(
     height: usize,
     rgba: &[u8],
     candidate: &PaletteCandidate,
-    optimization_level: u8,
-    use_color_cache: bool,
+    profile: &LosslessSearchProfile,
 ) -> Result<Vec<u8>, EncoderError> {
     let transform_options = TokenBuildOptions {
         color_cache_bits: 0,
@@ -1063,9 +1296,9 @@ fn encode_palette_candidate_to_vp8l(
         window_offset_limit: 0,
         lazy_matching: false,
     };
-    let no_cache_options = token_build_options(optimization_level, 0);
+    let no_cache_options = token_build_options(profile.match_search_level, 0);
     let mut token_options = no_cache_options;
-    if use_color_cache && candidate.packed_indices.len() >= 64 {
+    if profile.use_color_cache && candidate.packed_indices.len() >= 64 {
         let base_tokens = build_tokens(
             candidate.packed_width,
             &candidate.packed_indices,
@@ -1076,10 +1309,9 @@ fn encode_palette_candidate_to_vp8l(
             height,
             &candidate.packed_indices,
             &base_tokens,
-            max_color_cache_bits_for_level(optimization_level),
-            optimization_level,
+            profile,
         )?;
-        token_options = token_build_options(optimization_level, best_cache_bits);
+        token_options = token_build_options(profile.match_search_level, best_cache_bits);
     }
 
     let mut palette_image = Vec::with_capacity(candidate.palette.len());
@@ -1115,7 +1347,7 @@ fn encode_palette_candidate_to_vp8l(
         candidate.packed_width,
         &candidate.packed_indices,
         true,
-        optimization_level,
+        profile.entropy_search_level,
         token_options,
     )?;
 
@@ -1134,12 +1366,17 @@ fn find_match_length(argb: &[u32], first: usize, second: usize, max_len: usize) 
     len
 }
 
-fn token_build_options(optimization_level: u8, color_cache_bits: usize) -> TokenBuildOptions {
+fn token_build_options(match_search_level: u8, color_cache_bits: usize) -> TokenBuildOptions {
     let (match_chain_depth, use_window_offsets, window_offset_limit, lazy_matching) =
-        match optimization_level {
+        match match_search_level {
             0 => (0, false, 0, false),
             1 => (MATCH_CHAIN_DEPTH_LEVEL1, false, 0, false),
-            _ => (MATCH_CHAIN_DEPTH_LEVEL2, true, 64, true),
+            2 => (MATCH_CHAIN_DEPTH_LEVEL2, true, 16, false),
+            3 => (MATCH_CHAIN_DEPTH_LEVEL3, true, 32, false),
+            4 => (MATCH_CHAIN_DEPTH_LEVEL4, true, 64, true),
+            5 => (MATCH_CHAIN_DEPTH_LEVEL5, true, 96, true),
+            6 => (MATCH_CHAIN_DEPTH_LEVEL6, true, 128, true),
+            _ => (MATCH_CHAIN_DEPTH_LEVEL7, true, 160, true),
         };
     TokenBuildOptions {
         color_cache_bits,
@@ -1150,35 +1387,73 @@ fn token_build_options(optimization_level: u8, color_cache_bits: usize) -> Token
     }
 }
 
-fn max_color_cache_bits_for_level(optimization_level: u8) -> usize {
-    match optimization_level {
+fn max_color_cache_bits_for_profile(profile: &LosslessSearchProfile) -> usize {
+    if !profile.use_color_cache {
+        return 0;
+    }
+    match profile.entropy_search_level {
         0 => 0,
         1 => 7,
+        2 => 8,
+        3 => 9,
+        4 => 10,
         _ => MAX_CACHE_BITS,
     }
 }
 
-fn shortlist_color_cache_candidates_for_level(optimization_level: u8) -> usize {
-    match optimization_level {
-        0 => 1,
-        1 => 1,
-        _ => 2,
+fn shortlist_color_cache_candidates_for_profile(profile: &LosslessSearchProfile) -> usize {
+    match profile.entropy_search_level {
+        0 | 1 => 1,
+        2 | 3 => 2,
+        _ => 3,
     }
 }
 
 fn meta_huffman_candidates(
-    optimization_level: u8,
+    entropy_search_level: u8,
     width: usize,
     height: usize,
 ) -> &'static [(usize, usize)] {
-    match optimization_level {
+    match entropy_search_level {
         0 => &[],
         1 => &[(5usize, 4usize)],
+        2 => &[(6usize, 2usize), (5usize, 4usize)],
+        3 => &[(6usize, 2usize), (5usize, 4usize), (4usize, 4usize)],
+        4 if width * height >= 512 * 512 => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+        ],
+        4 => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+            (4usize, 6usize),
+        ],
+        5 if width * height >= 512 * 512 => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+            (4usize, 6usize),
+        ],
+        5 => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+            (4usize, 6usize),
+            (4usize, 8usize),
+        ],
         _ if width * height >= 512 * 512 => &[
             (6usize, 2usize),
             (5usize, 4usize),
             (5usize, 6usize),
             (4usize, 4usize),
+            (4usize, 6usize),
+            (4usize, 8usize),
         ],
         _ => &[
             (6usize, 2usize),
@@ -1186,6 +1461,8 @@ fn meta_huffman_candidates(
             (5usize, 6usize),
             (4usize, 4usize),
             (4usize, 6usize),
+            (4usize, 8usize),
+            (3usize, 8usize),
         ],
     }
 }
@@ -2434,14 +2711,14 @@ fn write_image_stream_from_tokens(
     height: usize,
     tokens: &[Token],
     emit_meta_huffman_flag: bool,
-    optimization_level: u8,
+    entropy_search_level: u8,
     color_cache_bits: usize,
 ) -> Result<(), EncoderError> {
     let histograms = build_histograms(tokens, width, color_cache_bits)?;
     let group = build_group_codes(&histograms)?;
 
     let meta_candidates = if emit_meta_huffman_flag {
-        meta_huffman_candidates(optimization_level, width, height)
+        meta_huffman_candidates(entropy_search_level, width, height)
     } else {
         &[]
     };
@@ -2493,7 +2770,7 @@ fn write_image_stream(
     width: usize,
     argb: &[u32],
     emit_meta_huffman_flag: bool,
-    optimization_level: u8,
+    entropy_search_level: u8,
     options: TokenBuildOptions,
 ) -> Result<(), EncoderError> {
     let base_tokens = build_tokens(
@@ -2511,7 +2788,7 @@ fn write_image_stream(
         argb.len() / width,
         &tokens,
         emit_meta_huffman_flag,
-        optimization_level,
+        entropy_search_level,
         options.color_cache_bits,
     )
 }
@@ -2552,7 +2829,7 @@ fn estimate_image_stream_size(
     tokens: &[Token],
     color_cache_bits: usize,
     emit_meta_huffman_flag: bool,
-    optimization_level: u8,
+    entropy_search_level: u8,
 ) -> Result<usize, EncoderError> {
     let mut bw = BitWriter::default();
     write_image_stream_from_tokens(
@@ -2561,7 +2838,7 @@ fn estimate_image_stream_size(
         height,
         tokens,
         emit_meta_huffman_flag,
-        optimization_level,
+        entropy_search_level,
         color_cache_bits,
     )?;
     Ok(bw.into_bytes().len())
@@ -2582,11 +2859,11 @@ fn select_best_color_cache_bits(
     height: usize,
     argb: &[u32],
     base_tokens: &[Token],
-    max_cache_bits: usize,
-    optimization_level: u8,
+    profile: &LosslessSearchProfile,
 ) -> Result<usize, EncoderError> {
-    let max_cache_bits = suggested_max_color_cache_bits(argb, max_cache_bits);
-    let shortlist_size = shortlist_color_cache_candidates_for_level(optimization_level);
+    let max_cache_bits =
+        suggested_max_color_cache_bits(argb, max_color_cache_bits_for_profile(profile));
+    let shortlist_size = shortlist_color_cache_candidates_for_profile(profile);
 
     let mut cheap_candidates = Vec::with_capacity(max_cache_bits + 1);
     cheap_candidates.push((
@@ -2612,6 +2889,17 @@ fn select_best_color_cache_bits(
     let mut best_cache_bits = 0usize;
     let mut best_size = usize::MAX;
     for cache_bits in shortlist {
+        let cheap_cost = if cache_bits == 0 {
+            estimate_cache_candidate_cost(width, base_tokens, 0)?
+        } else {
+            let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
+            estimate_cache_candidate_cost(width, &tokens, cache_bits)?
+        };
+        if best_size != usize::MAX
+            && should_stop_transform_search(best_size, cheap_cost.div_ceil(8), profile)
+        {
+            break;
+        }
         let size = if cache_bits == 0 {
             estimate_image_stream_size(width, height, base_tokens, 0, false, 0)?
         } else {
@@ -2637,68 +2925,41 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     validate_rgba(width, height, rgba)?;
     validate_options(options)?;
 
+    let profile = lossless_search_profile(options.optimization_level);
     let argb = rgba_to_argb(rgba);
     let subtract_green = apply_subtract_green_transform(&argb);
-    let use_color_cache = options.optimization_level >= 1;
-    let mut plans = vec![build_raw_plan(&argb)];
-    if subtract_green != argb {
-        plans.push(build_subtract_green_plan(&subtract_green));
-    }
-    if options.optimization_level >= 1 {
-        plans.push(build_global_cross_plan(width, height, &subtract_green));
-        plans.push(build_global_transform_plan(width, height, &subtract_green));
-    }
-    if options.optimization_level >= 2 {
-        plans.push(build_global_predictor_plan(width, height, &subtract_green));
-        plans.push(build_tiled_cross_plan(width, height, &subtract_green));
-        plans.push(build_tiled_predictor_plan(width, height, &subtract_green));
-        plans.push(build_tiled_transform_plan(width, height, &subtract_green));
-    }
-
-    let shortlist_size = match options.optimization_level {
-        0 => plans.len(),
-        1 => plans.len().min(3),
-        _ => plans.len().min(4),
+    let mut best = if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
+        Some(encode_palette_candidate_to_vp8l(
+            width, height, rgba, &candidate, &profile,
+        )?)
+    } else {
+        None
     };
-    let plans = shortlist_transform_plans(width, height, rgba, plans, shortlist_size)?;
 
-    let mut best = encode_transform_plan_to_vp8l(
-        width,
-        height,
-        rgba,
-        &plans[0],
-        options.optimization_level,
-        use_color_cache,
-    )?;
-    for plan in plans.iter().skip(1) {
-        let encoded = encode_transform_plan_to_vp8l(
-            width,
-            height,
-            rgba,
-            plan,
-            options.optimization_level,
-            use_color_cache,
-        )?;
-        if encoded.len() < best.len() {
-            best = encoded;
+    let plans = collect_transform_plans(width, height, &argb, &subtract_green, &profile);
+    let ranked_plans = shortlist_transform_plans(width, plans, &profile)?;
+    for (estimate, plan) in ranked_plans {
+        if best
+            .as_ref()
+            .map(|encoded| should_stop_transform_search(encoded.len(), estimate, &profile))
+            .unwrap_or(false)
+        {
+            break;
+        }
+
+        let encoded = encode_transform_plan_to_vp8l(width, height, rgba, &plan, &profile)?;
+        if best
+            .as_ref()
+            .map(|current| encoded.len() < current.len())
+            .unwrap_or(true)
+        {
+            best = Some(encoded);
         }
     }
 
-    if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
-        let palette = encode_palette_candidate_to_vp8l(
-            width,
-            height,
-            rgba,
-            &candidate,
-            options.optimization_level,
-            use_color_cache,
-        )?;
-        if palette.len() < best.len() {
-            best = palette;
-        }
-    }
-
-    Ok(best)
+    best.ok_or(EncoderError::Bitstream(
+        "lossless encoder produced no candidate",
+    ))
 }
 
 /// Encodes RGBA pixels to a raw lossless `VP8L` frame payload.
