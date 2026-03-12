@@ -149,13 +149,17 @@ fn default_output_path(input: &Path) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run --example bmp2webp -- [--lossy --quality 0..100 [-z 0..9]] [--opt-level 0|1|2] <input.bmp> [output.webp]"
+    "usage: cargo run --example bmp2webp -- [-z N] [--lossy --quality 0..100 [--lossy-opt-level 0..9]] [--opt-level 0|1|2] <input.bmp> [output.webp]"
+}
+
+fn parse_u8_level(value: &str, what: &str) -> Result<u8, Error> {
+    value
+        .parse::<u8>()
+        .map_err(|_| invalid_input_owned(format!("invalid {what}: {value}")))
 }
 
 fn parse_optimization_level(value: &str) -> Result<u8, Error> {
-    let level = value
-        .parse::<u8>()
-        .map_err(|_| invalid_input_owned(format!("invalid optimization level: {value}")))?;
+    let level = parse_u8_level(value, "optimization level")?;
     if level > 2 {
         return Err(invalid_input("optimization level must be in 0..=2"));
     }
@@ -163,9 +167,7 @@ fn parse_optimization_level(value: &str) -> Result<u8, Error> {
 }
 
 fn parse_lossy_optimization_level(value: &str) -> Result<u8, Error> {
-    let level = value
-        .parse::<u8>()
-        .map_err(|_| invalid_input_owned(format!("invalid lossy optimization level: {value}")))?;
+    let level = parse_u8_level(value, "lossy optimization level")?;
     if level > 9 {
         return Err(invalid_input("lossy optimization level must be in 0..=9"));
     }
@@ -189,6 +191,9 @@ fn main() -> Result<(), Error> {
     let mut options = LosslessEncodingOptions::default();
     let mut lossy = false;
     let mut lossy_options = LossyEncodingOptions::default();
+    let mut shared_optimization_level = None;
+    let mut lossless_optimization_explicit = false;
+    let mut lossy_optimization_explicit = false;
 
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
@@ -196,15 +201,24 @@ fn main() -> Result<(), Error> {
             "--opt" | "--opt-level" | "-O" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
                 options.optimization_level = parse_optimization_level(&value.to_string_lossy())?;
+                lossless_optimization_explicit = true;
             }
             "--quality" | "-q" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
                 lossy_options.quality = parse_quality(&value.to_string_lossy())?;
             }
-            "-z" | "--lossy-opt-level" => {
+            "-z" => {
+                let value = args.next().ok_or_else(|| invalid_input(usage()))?;
+                shared_optimization_level = Some(parse_u8_level(
+                    &value.to_string_lossy(),
+                    "optimization level",
+                )?);
+            }
+            "--lossy-opt-level" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
                 lossy_options.optimization_level =
                     parse_lossy_optimization_level(&value.to_string_lossy())?;
+                lossy_optimization_explicit = true;
             }
             _ => {
                 if input.is_none() {
@@ -215,6 +229,24 @@ fn main() -> Result<(), Error> {
                     return Err(invalid_input(usage()));
                 }
             }
+        }
+    }
+
+    if let Some(level) = shared_optimization_level {
+        if lossy {
+            if !lossy_optimization_explicit {
+                lossy_options.optimization_level = if level <= 9 {
+                    level
+                } else {
+                    return Err(invalid_input("lossy optimization level must be in 0..=9"));
+                };
+            }
+        } else if !lossless_optimization_explicit {
+            options.optimization_level = if level <= 2 {
+                level
+            } else {
+                return Err(invalid_input("optimization level must be in 0..=2"));
+            };
         }
     }
 

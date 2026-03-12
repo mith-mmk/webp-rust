@@ -20,6 +20,8 @@ const NUM_LITERAL_CODES: usize = 256;
 const NUM_LENGTH_CODES: usize = 24;
 const NUM_DISTANCE_CODES: usize = 40;
 const NUM_CODE_LENGTH_CODES: usize = 19;
+const MIN_HUFFMAN_BITS: usize = 2;
+const NUM_HUFFMAN_BITS: usize = 3;
 const COLOR_CACHE_HASH_MUL: u32 = 0x1e35_a7bd;
 const MATCH_HASH_BITS: usize = 15;
 const MATCH_HASH_SIZE: usize = 1 << MATCH_HASH_BITS;
@@ -67,10 +69,11 @@ struct ColorCache {
 
 #[derive(Debug, Clone)]
 struct TransformPlan {
-    cross_bits: usize,
+    use_subtract_green: bool,
+    cross_bits: Option<usize>,
     cross_width: usize,
     cross_image: Vec<u32>,
-    predictor_bits: usize,
+    predictor_bits: Option<usize>,
     predictor_width: usize,
     predictor_image: Vec<u32>,
     predicted: Vec<u32>,
@@ -82,6 +85,25 @@ struct TokenBuildOptions {
     match_chain_depth: usize,
     use_window_offsets: bool,
     lazy_matching: bool,
+}
+
+type HistogramSet = [Vec<u32>; 5];
+
+#[derive(Debug, Clone)]
+struct HuffmanGroupCodes {
+    green: HuffmanCode,
+    red: HuffmanCode,
+    blue: HuffmanCode,
+    alpha: HuffmanCode,
+    dist: HuffmanCode,
+}
+
+#[derive(Debug, Clone)]
+struct MetaHuffmanPlan {
+    huffman_bits: usize,
+    huffman_xsize: usize,
+    assignments: Vec<usize>,
+    groups: Vec<HuffmanGroupCodes>,
 }
 
 /// Lossless encoder tuning knobs.
@@ -164,7 +186,7 @@ fn validate_options(options: &LosslessEncodingOptions) -> Result<(), EncoderErro
     Ok(())
 }
 
-fn has_alpha(rgba: &[u8]) -> bool {
+fn rgba_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff)
 }
 
@@ -599,11 +621,7 @@ fn make_uniform_cross_color_transform_image(
     )
 }
 
-fn build_global_transform_plan(
-    width: usize,
-    height: usize,
-    subtract_green: &[u32],
-) -> TransformPlan {
+fn build_global_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -> TransformPlan {
     let cross_transform = estimate_cross_color_transform(subtract_green);
     let (cross_width, _cross_height, cross_transforms, cross_image) =
         make_uniform_cross_color_transform_image(
@@ -619,6 +637,26 @@ fn build_global_transform_plan(
         GLOBAL_CROSS_COLOR_TRANSFORM_BITS,
         &cross_transforms,
     );
+
+    TransformPlan {
+        use_subtract_green: true,
+        cross_bits: Some(GLOBAL_CROSS_COLOR_TRANSFORM_BITS),
+        cross_width,
+        cross_image,
+        predictor_bits: None,
+        predictor_width: 0,
+        predictor_image: Vec::new(),
+        predicted: cross_colored,
+    }
+}
+
+fn build_global_transform_plan(
+    width: usize,
+    height: usize,
+    subtract_green: &[u32],
+) -> TransformPlan {
+    let cross_plan = build_global_cross_plan(width, height, subtract_green);
+    let cross_colored = cross_plan.predicted.clone();
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
         make_uniform_predictor_transform_image(
             width,
@@ -635,21 +673,18 @@ fn build_global_transform_plan(
     );
 
     TransformPlan {
-        cross_bits: GLOBAL_CROSS_COLOR_TRANSFORM_BITS,
-        cross_width,
-        cross_image,
-        predictor_bits: GLOBAL_PREDICTOR_TRANSFORM_BITS,
+        use_subtract_green: true,
+        cross_bits: cross_plan.cross_bits,
+        cross_width: cross_plan.cross_width,
+        cross_image: cross_plan.cross_image,
+        predictor_bits: Some(GLOBAL_PREDICTOR_TRANSFORM_BITS),
         predictor_width,
         predictor_image,
         predicted,
     }
 }
 
-fn build_tiled_transform_plan(
-    width: usize,
-    height: usize,
-    subtract_green: &[u32],
-) -> TransformPlan {
+fn build_tiled_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -> TransformPlan {
     let (cross_width, _cross_height, cross_transforms, cross_image) =
         make_cross_color_transform_image(width, height, subtract_green);
     let cross_colored = apply_cross_color_transform(
@@ -659,6 +694,26 @@ fn build_tiled_transform_plan(
         CROSS_COLOR_TRANSFORM_BITS,
         &cross_transforms,
     );
+
+    TransformPlan {
+        use_subtract_green: true,
+        cross_bits: Some(CROSS_COLOR_TRANSFORM_BITS),
+        cross_width,
+        cross_image,
+        predictor_bits: None,
+        predictor_width: 0,
+        predictor_image: Vec::new(),
+        predicted: cross_colored,
+    }
+}
+
+fn build_tiled_transform_plan(
+    width: usize,
+    height: usize,
+    subtract_green: &[u32],
+) -> TransformPlan {
+    let cross_plan = build_tiled_cross_plan(width, height, subtract_green);
+    let cross_colored = cross_plan.predicted.clone();
     let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
         make_predictor_transform_image(width, height, &cross_colored);
     let predicted = apply_predictor_transform(
@@ -670,10 +725,11 @@ fn build_tiled_transform_plan(
     );
 
     TransformPlan {
-        cross_bits: CROSS_COLOR_TRANSFORM_BITS,
-        cross_width,
-        cross_image,
-        predictor_bits: PREDICTOR_TRANSFORM_BITS,
+        use_subtract_green: true,
+        cross_bits: cross_plan.cross_bits,
+        cross_width: cross_plan.cross_width,
+        cross_image: cross_plan.cross_image,
+        predictor_bits: Some(PREDICTOR_TRANSFORM_BITS),
         predictor_width,
         predictor_image,
         predicted,
@@ -725,31 +781,37 @@ fn encode_transform_plan_to_vp8l_with_cache(
     let mut bw = BitWriter::default();
     bw.put_bits((width - 1) as u32, 14)?;
     bw.put_bits((height - 1) as u32, 14)?;
-    bw.put_bits(has_alpha(rgba) as u32, 1)?;
+    bw.put_bits(rgba_has_alpha(rgba) as u32, 1)?;
     bw.put_bits(0, 3)?;
 
-    bw.put_bits(1, 1)?;
-    bw.put_bits(2, 2)?;
-    bw.put_bits(1, 1)?;
-    bw.put_bits(1, 2)?;
-    bw.put_bits((plan.cross_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
-    write_image_stream(
-        &mut bw,
-        plan.cross_width,
-        &plan.cross_image,
-        false,
-        transform_options,
-    )?;
-    bw.put_bits(1, 1)?;
-    bw.put_bits(0, 2)?;
-    bw.put_bits((plan.predictor_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
-    write_image_stream(
-        &mut bw,
-        plan.predictor_width,
-        &plan.predictor_image,
-        false,
-        transform_options,
-    )?;
+    if plan.use_subtract_green {
+        bw.put_bits(1, 1)?;
+        bw.put_bits(2, 2)?;
+    }
+    if let Some(cross_bits) = plan.cross_bits {
+        bw.put_bits(1, 1)?;
+        bw.put_bits(1, 2)?;
+        bw.put_bits((cross_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
+        write_image_stream(
+            &mut bw,
+            plan.cross_width,
+            &plan.cross_image,
+            false,
+            transform_options,
+        )?;
+    }
+    if let Some(predictor_bits) = plan.predictor_bits {
+        bw.put_bits(1, 1)?;
+        bw.put_bits(0, 2)?;
+        bw.put_bits((predictor_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
+        write_image_stream(
+            &mut bw,
+            plan.predictor_width,
+            &plan.predictor_image,
+            false,
+            transform_options,
+        )?;
+    }
     bw.put_bits(0, 1)?;
     write_image_stream(&mut bw, width, &plan.predicted, true, token_options)?;
 
@@ -1275,49 +1337,154 @@ fn build_histograms(
     tokens: &[Token],
     width: usize,
     color_cache_bits: usize,
-) -> Result<[Vec<u32>; 5], EncoderError> {
-    let mut green = vec![
-        0u32;
-        NUM_LITERAL_CODES
-            + NUM_LENGTH_CODES
-            + if color_cache_bits > 0 {
-                1usize << color_cache_bits
-            } else {
-                0
-            }
-    ];
-    let mut red = vec![0u32; NUM_LITERAL_CODES];
-    let mut blue = vec![0u32; NUM_LITERAL_CODES];
-    let mut alpha = vec![0u32; NUM_LITERAL_CODES];
-    let mut dist = vec![0u32; NUM_DISTANCE_CODES];
+) -> Result<HistogramSet, EncoderError> {
+    let mut histograms = new_histograms(color_cache_bits);
+    for &token in tokens {
+        add_token_to_histograms(&mut histograms, width, token)?;
+    }
+    normalize_histograms(&mut histograms);
+    Ok(histograms)
+}
 
-    for token in tokens {
-        match *token {
-            Token::Literal(argb) => {
-                green[((argb >> 8) & 0xff) as usize] += 1;
-                red[((argb >> 16) & 0xff) as usize] += 1;
-                blue[(argb & 0xff) as usize] += 1;
-                alpha[((argb >> 24) & 0xff) as usize] += 1;
-            }
-            Token::Cache(key) => {
-                green[NUM_LITERAL_CODES + NUM_LENGTH_CODES + key] += 1;
-            }
-            Token::Copy { distance, length } => {
-                let length_prefix = prefix_encode(length)?;
-                green[NUM_LITERAL_CODES + length_prefix.symbol] += 1;
+fn new_histograms(color_cache_bits: usize) -> HistogramSet {
+    [
+        vec![
+            0u32;
+            NUM_LITERAL_CODES
+                + NUM_LENGTH_CODES
+                + if color_cache_bits > 0 {
+                    1usize << color_cache_bits
+                } else {
+                    0
+                }
+        ],
+        vec![0u32; NUM_LITERAL_CODES],
+        vec![0u32; NUM_LITERAL_CODES],
+        vec![0u32; NUM_LITERAL_CODES],
+        vec![0u32; NUM_DISTANCE_CODES],
+    ]
+}
 
-                let plane_code = distance_to_plane_code(width, distance);
-                let dist_prefix = prefix_encode(plane_code)?;
-                dist[dist_prefix.symbol] += 1;
-            }
+fn add_token_to_histograms(
+    histograms: &mut HistogramSet,
+    width: usize,
+    token: Token,
+) -> Result<(), EncoderError> {
+    match token {
+        Token::Literal(argb) => {
+            histograms[0][((argb >> 8) & 0xff) as usize] += 1;
+            histograms[1][((argb >> 16) & 0xff) as usize] += 1;
+            histograms[2][(argb & 0xff) as usize] += 1;
+            histograms[3][((argb >> 24) & 0xff) as usize] += 1;
+        }
+        Token::Cache(key) => {
+            histograms[0][NUM_LITERAL_CODES + NUM_LENGTH_CODES + key] += 1;
+        }
+        Token::Copy { distance, length } => {
+            let length_prefix = prefix_encode(length)?;
+            histograms[0][NUM_LITERAL_CODES + length_prefix.symbol] += 1;
+
+            let plane_code = distance_to_plane_code(width, distance);
+            let dist_prefix = prefix_encode(plane_code)?;
+            histograms[4][dist_prefix.symbol] += 1;
         }
     }
+    Ok(())
+}
 
-    if dist.iter().all(|&count| count == 0) {
-        dist[0] = 1;
+fn normalize_histograms(histograms: &mut HistogramSet) {
+    for histogram in histograms.iter_mut().take(4) {
+        if histogram.iter().all(|&count| count == 0) {
+            histogram[0] = 1;
+        }
     }
+    if histograms[4].iter().all(|&count| count == 0) {
+        histograms[4][0] = 1;
+    }
+}
 
-    Ok([green, red, blue, alpha, dist])
+fn merge_histograms(dst: &mut HistogramSet, src: &HistogramSet) {
+    for (dst_histogram, src_histogram) in dst.iter_mut().zip(src.iter()) {
+        for (dst_count, src_count) in dst_histogram.iter_mut().zip(src_histogram.iter()) {
+            *dst_count += *src_count;
+        }
+    }
+}
+
+fn build_group_codes(histograms: &HistogramSet) -> Result<HuffmanGroupCodes, EncoderError> {
+    Ok(HuffmanGroupCodes {
+        green: HuffmanCode::from_histogram(&histograms[0], 15)?,
+        red: HuffmanCode::from_histogram(&histograms[1], 15)?,
+        blue: HuffmanCode::from_histogram(&histograms[2], 15)?,
+        alpha: HuffmanCode::from_histogram(&histograms[3], 15)?,
+        dist: HuffmanCode::from_histogram(&histograms[4], 15)?,
+    })
+}
+
+fn token_len(token: Token) -> usize {
+    match token {
+        Token::Copy { length, .. } => length,
+        Token::Literal(_) | Token::Cache(_) => 1,
+    }
+}
+
+fn tile_index_for_pos(
+    width: usize,
+    huffman_bits: usize,
+    huffman_xsize: usize,
+    pos: usize,
+) -> usize {
+    let x = pos % width;
+    let y = pos / width;
+    (y >> huffman_bits) * huffman_xsize + (x >> huffman_bits)
+}
+
+fn histogram_cost(histograms: &HistogramSet, codes: &HuffmanGroupCodes) -> usize {
+    histograms[0]
+        .iter()
+        .zip(codes.green.code_lengths())
+        .map(|(&count, &bits)| count as usize * bits as usize)
+        .sum::<usize>()
+        + histograms[1]
+            .iter()
+            .zip(codes.red.code_lengths())
+            .map(|(&count, &bits)| count as usize * bits as usize)
+            .sum::<usize>()
+        + histograms[2]
+            .iter()
+            .zip(codes.blue.code_lengths())
+            .map(|(&count, &bits)| count as usize * bits as usize)
+            .sum::<usize>()
+        + histograms[3]
+            .iter()
+            .zip(codes.alpha.code_lengths())
+            .map(|(&count, &bits)| count as usize * bits as usize)
+            .sum::<usize>()
+        + histograms[4]
+            .iter()
+            .zip(codes.dist.code_lengths())
+            .map(|(&count, &bits)| count as usize * bits as usize)
+            .sum::<usize>()
+}
+
+fn assign_tiles_to_groups(
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    group_codes: &[HuffmanGroupCodes],
+    assignments: &mut [usize],
+) {
+    for &(tile, _) in non_empty_tiles {
+        let mut best_group = 0usize;
+        let mut best_cost = usize::MAX;
+        for (group_index, codes) in group_codes.iter().enumerate() {
+            let cost = histogram_cost(&tile_histograms[tile], codes);
+            if cost < best_cost {
+                best_cost = cost;
+                best_group = group_index;
+            }
+        }
+        assignments[tile] = best_group;
+    }
 }
 
 fn apply_color_cache_to_tokens(
@@ -1359,6 +1526,167 @@ fn apply_color_cache_to_tokens(
     }
 
     Ok(cached_tokens)
+}
+
+fn build_meta_huffman_plan(
+    width: usize,
+    height: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+    huffman_bits: usize,
+    max_groups: usize,
+) -> Result<Option<MetaHuffmanPlan>, EncoderError> {
+    if !(MIN_HUFFMAN_BITS..MIN_HUFFMAN_BITS + (1 << NUM_HUFFMAN_BITS)).contains(&huffman_bits) {
+        return Ok(None);
+    }
+
+    let huffman_xsize = subsample_size(width, huffman_bits);
+    let huffman_ysize = subsample_size(height, huffman_bits);
+    let tile_count = huffman_xsize * huffman_ysize;
+    if tile_count <= 1 {
+        return Ok(None);
+    }
+
+    let mut tile_histograms = vec![new_histograms(color_cache_bits); tile_count];
+    let mut tile_weights = vec![0usize; tile_count];
+    let mut pos = 0usize;
+    for &token in tokens {
+        let tile = tile_index_for_pos(width, huffman_bits, huffman_xsize, pos);
+        add_token_to_histograms(&mut tile_histograms[tile], width, token)?;
+        tile_weights[tile] += token_len(token);
+        pos += token_len(token);
+    }
+
+    let mut non_empty_tiles = tile_weights
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &weight)| (weight != 0).then_some((index, weight)))
+        .collect::<Vec<_>>();
+    if non_empty_tiles.len() <= 1 {
+        return Ok(None);
+    }
+    non_empty_tiles.sort_by(|lhs, rhs| rhs.1.cmp(&lhs.1));
+
+    let group_count = max_groups.min(non_empty_tiles.len());
+    if group_count <= 1 {
+        return Ok(None);
+    }
+
+    let seed_tiles = non_empty_tiles
+        .iter()
+        .take(group_count)
+        .map(|&(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut group_codes = seed_tiles
+        .iter()
+        .map(|&tile| {
+            let mut histograms = tile_histograms[tile].clone();
+            normalize_histograms(&mut histograms);
+            build_group_codes(&histograms)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut assignments = vec![0usize; tile_count];
+    for _ in 0..2 {
+        assign_tiles_to_groups(
+            &non_empty_tiles,
+            &tile_histograms,
+            &group_codes,
+            &mut assignments,
+        );
+
+        let mut remap = vec![usize::MAX; group_codes.len()];
+        let mut merged_histograms = Vec::new();
+        for (group_index, _) in group_codes.iter().enumerate() {
+            let mut histograms = new_histograms(color_cache_bits);
+            let mut used = false;
+            for &(tile, _) in &non_empty_tiles {
+                if assignments[tile] == group_index {
+                    merge_histograms(&mut histograms, &tile_histograms[tile]);
+                    used = true;
+                }
+            }
+            if used {
+                normalize_histograms(&mut histograms);
+                remap[group_index] = merged_histograms.len();
+                merged_histograms.push(histograms);
+            }
+        }
+        if merged_histograms.len() <= 1 {
+            return Ok(None);
+        }
+        for &(tile, _) in &non_empty_tiles {
+            assignments[tile] = remap[assignments[tile]];
+        }
+        group_codes = merged_histograms
+            .iter()
+            .map(build_group_codes)
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
+    Ok(Some(MetaHuffmanPlan {
+        huffman_bits,
+        huffman_xsize,
+        assignments,
+        groups: group_codes,
+    }))
+}
+
+fn write_huffman_group(bw: &mut BitWriter, group: &HuffmanGroupCodes) -> Result<(), EncoderError> {
+    write_huffman_tree(bw, &group.green)?;
+    write_huffman_tree(bw, &group.red)?;
+    write_huffman_tree(bw, &group.blue)?;
+    write_huffman_tree(bw, &group.alpha)?;
+    write_huffman_tree(bw, &group.dist)
+}
+
+fn write_tokens_with_meta(
+    bw: &mut BitWriter,
+    tokens: &[Token],
+    width: usize,
+    plan: &MetaHuffmanPlan,
+) -> Result<(), EncoderError> {
+    let mut pos = 0usize;
+    for &token in tokens {
+        let tile = tile_index_for_pos(width, plan.huffman_bits, plan.huffman_xsize, pos);
+        let group = &plan.groups[plan.assignments[tile]];
+        match token {
+            Token::Literal(argb) => {
+                let green = ((argb >> 8) & 0xff) as usize;
+                let red = ((argb >> 16) & 0xff) as usize;
+                let blue = (argb & 0xff) as usize;
+                let alpha = ((argb >> 24) & 0xff) as usize;
+
+                group.green.write_symbol(bw, green)?;
+                group.red.write_symbol(bw, red)?;
+                group.blue.write_symbol(bw, blue)?;
+                group.alpha.write_symbol(bw, alpha)?;
+            }
+            Token::Cache(key) => {
+                group
+                    .green
+                    .write_symbol(bw, NUM_LITERAL_CODES + NUM_LENGTH_CODES + key)?;
+            }
+            Token::Copy { distance, length } => {
+                let length_prefix = prefix_encode(length)?;
+                group
+                    .green
+                    .write_symbol(bw, NUM_LITERAL_CODES + length_prefix.symbol)?;
+                if length_prefix.extra_bits > 0 {
+                    bw.put_bits(length_prefix.extra_value as u32, length_prefix.extra_bits)?;
+                }
+
+                let plane_code = distance_to_plane_code(width, distance);
+                let dist_prefix = prefix_encode(plane_code)?;
+                group.dist.write_symbol(bw, dist_prefix.symbol)?;
+                if dist_prefix.extra_bits > 0 {
+                    bw.put_bits(dist_prefix.extra_value as u32, dist_prefix.extra_bits)?;
+                }
+            }
+        }
+        pos += token_len(token);
+    }
+    Ok(())
 }
 
 fn write_tokens(
@@ -1407,22 +1735,14 @@ fn write_tokens(
     Ok(())
 }
 
-fn write_image_stream_from_tokens(
+fn write_single_group_image_stream(
     bw: &mut BitWriter,
     width: usize,
     tokens: &[Token],
     allow_meta_huffman: bool,
     color_cache_bits: usize,
+    group: &HuffmanGroupCodes,
 ) -> Result<(), EncoderError> {
-    let [green_hist, red_hist, blue_hist, alpha_hist, dist_hist] =
-        build_histograms(tokens, width, color_cache_bits)?;
-
-    let green_codes = HuffmanCode::from_histogram(&green_hist, 15)?;
-    let red_codes = HuffmanCode::from_histogram(&red_hist, 15)?;
-    let blue_codes = HuffmanCode::from_histogram(&blue_hist, 15)?;
-    let alpha_codes = HuffmanCode::from_histogram(&alpha_hist, 15)?;
-    let dist_codes = HuffmanCode::from_histogram(&dist_hist, 15)?;
-
     bw.put_bits((color_cache_bits > 0) as u32, 1)?;
     if color_cache_bits > 0 {
         bw.put_bits(color_cache_bits as u32, 4)?;
@@ -1431,21 +1751,114 @@ fn write_image_stream_from_tokens(
         bw.put_bits(0, 1)?;
     }
 
-    write_huffman_tree(bw, &green_codes)?;
-    write_huffman_tree(bw, &red_codes)?;
-    write_huffman_tree(bw, &blue_codes)?;
-    write_huffman_tree(bw, &alpha_codes)?;
-    write_huffman_tree(bw, &dist_codes)?;
+    write_huffman_group(bw, group)?;
 
     write_tokens(
         bw,
         tokens,
         width,
-        &green_codes,
-        &red_codes,
-        &blue_codes,
-        &alpha_codes,
-        &dist_codes,
+        &group.green,
+        &group.red,
+        &group.blue,
+        &group.alpha,
+        &group.dist,
+    )
+}
+
+fn write_meta_huffman_image_stream(
+    bw: &mut BitWriter,
+    width: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+    plan: &MetaHuffmanPlan,
+) -> Result<(), EncoderError> {
+    bw.put_bits((color_cache_bits > 0) as u32, 1)?;
+    if color_cache_bits > 0 {
+        bw.put_bits(color_cache_bits as u32, 4)?;
+    }
+    bw.put_bits(1, 1)?;
+    bw.put_bits(
+        (plan.huffman_bits - MIN_HUFFMAN_BITS) as u32,
+        NUM_HUFFMAN_BITS,
+    )?;
+
+    let huffman_image = plan
+        .assignments
+        .iter()
+        .map(|&group| (((group >> 8) as u32) << 16) | (((group & 0xff) as u32) << 8))
+        .collect::<Vec<_>>();
+    write_image_stream(
+        bw,
+        plan.huffman_xsize,
+        &huffman_image,
+        false,
+        TokenBuildOptions {
+            color_cache_bits: 0,
+            match_chain_depth: 0,
+            use_window_offsets: false,
+            lazy_matching: false,
+        },
+    )?;
+
+    for group in &plan.groups {
+        write_huffman_group(bw, group)?;
+    }
+    write_tokens_with_meta(bw, tokens, width, plan)
+}
+
+fn write_image_stream_from_tokens(
+    bw: &mut BitWriter,
+    width: usize,
+    height: usize,
+    tokens: &[Token],
+    allow_meta_huffman: bool,
+    color_cache_bits: usize,
+) -> Result<(), EncoderError> {
+    let histograms = build_histograms(tokens, width, color_cache_bits)?;
+    let group = build_group_codes(&histograms)?;
+
+    if allow_meta_huffman {
+        let single_size =
+            estimate_single_group_image_stream_size(width, tokens, color_cache_bits, true, &group)?;
+        let mut best_meta = None;
+        let mut best_meta_size = usize::MAX;
+        for &(huffman_bits, max_groups) in &[(5usize, 4usize), (4usize, 4usize)] {
+            for group_count in 2..=max_groups {
+                if let Some(plan) = build_meta_huffman_plan(
+                    width,
+                    height,
+                    tokens,
+                    color_cache_bits,
+                    huffman_bits,
+                    group_count,
+                )? {
+                    let size = estimate_meta_huffman_image_stream_size(
+                        width,
+                        tokens,
+                        color_cache_bits,
+                        &plan,
+                    )?;
+                    if size < best_meta_size {
+                        best_meta_size = size;
+                        best_meta = Some(plan);
+                    }
+                }
+            }
+        }
+        if let Some(plan) = best_meta {
+            if best_meta_size < single_size {
+                return write_meta_huffman_image_stream(bw, width, tokens, color_cache_bits, &plan);
+            }
+        }
+    }
+
+    write_single_group_image_stream(
+        bw,
+        width,
+        tokens,
+        allow_meta_huffman,
+        color_cache_bits,
+        &group,
     )
 }
 
@@ -1468,10 +1881,41 @@ fn write_image_stream(
     write_image_stream_from_tokens(
         bw,
         width,
+        argb.len() / width,
         &tokens,
         allow_meta_huffman,
         options.color_cache_bits,
     )
+}
+
+fn estimate_single_group_image_stream_size(
+    width: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+    allow_meta_huffman: bool,
+    group: &HuffmanGroupCodes,
+) -> Result<usize, EncoderError> {
+    let mut bw = BitWriter::default();
+    write_single_group_image_stream(
+        &mut bw,
+        width,
+        tokens,
+        allow_meta_huffman,
+        color_cache_bits,
+        group,
+    )?;
+    Ok(bw.into_bytes().len())
+}
+
+fn estimate_meta_huffman_image_stream_size(
+    width: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+    plan: &MetaHuffmanPlan,
+) -> Result<usize, EncoderError> {
+    let mut bw = BitWriter::default();
+    write_meta_huffman_image_stream(&mut bw, width, tokens, color_cache_bits, plan)?;
+    Ok(bw.into_bytes().len())
 }
 
 fn estimate_image_stream_size(
@@ -1481,7 +1925,14 @@ fn estimate_image_stream_size(
     allow_meta_huffman: bool,
 ) -> Result<usize, EncoderError> {
     let mut bw = BitWriter::default();
-    write_image_stream_from_tokens(&mut bw, width, tokens, allow_meta_huffman, color_cache_bits)?;
+    write_image_stream_from_tokens(
+        &mut bw,
+        width,
+        1,
+        tokens,
+        allow_meta_huffman,
+        color_cache_bits,
+    )?;
     Ok(bw.into_bytes().len())
 }
 
@@ -1492,11 +1943,11 @@ fn select_best_color_cache_bits(
     max_cache_bits: usize,
 ) -> Result<usize, EncoderError> {
     let mut best_cache_bits = 0usize;
-    let mut best_size = estimate_image_stream_size(width, base_tokens, 0, true)?;
+    let mut best_size = estimate_image_stream_size(width, base_tokens, 0, false)?;
 
     for cache_bits in 1..=max_cache_bits {
         let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
-        let size = estimate_image_stream_size(width, &tokens, cache_bits, true)?;
+        let size = estimate_image_stream_size(width, &tokens, cache_bits, false)?;
         if size < best_size {
             best_size = size;
             best_cache_bits = cache_bits;
@@ -1517,8 +1968,8 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     validate_options(options)?;
 
     let subtract_green = apply_subtract_green_transform(&rgba_to_argb(rgba));
-    let global_plan = build_global_transform_plan(width, height, &subtract_green);
     let use_color_cache = options.optimization_level >= 1;
+    let global_plan = build_global_transform_plan(width, height, &subtract_green);
     let mut best = encode_transform_plan_to_vp8l(
         width,
         height,
@@ -1585,7 +2036,7 @@ pub fn encode_lossless_rgba_to_webp_with_options_and_exif(
             payload: &vp8l,
             width,
             height,
-            has_alpha: has_alpha(rgba),
+            has_alpha: rgba_has_alpha(rgba),
         },
         exif,
     )
