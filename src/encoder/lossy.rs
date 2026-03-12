@@ -28,7 +28,7 @@ const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
 type CoeffProbTables = [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 type CoeffStats = [[[[u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 
-const DEFAULT_LOSSY_OPTIMIZATION_LEVEL: u8 = 4;
+const DEFAULT_LOSSY_OPTIMIZATION_LEVEL: u8 = 0;
 const MAX_LOSSY_OPTIMIZATION_LEVEL: u8 = 9;
 
 /// Lossy encoder tuning knobs.
@@ -38,7 +38,7 @@ pub struct LossyEncodingOptions {
     pub quality: u8,
     /// Search effort from `0` to `9`.
     ///
-    /// The default `4` keeps encode time moderate. `9` enables the heaviest
+    /// The default `0` favors fast encode speed. `9` enables the heaviest
     /// search profile currently implemented.
     pub optimization_level: u8,
 }
@@ -115,6 +115,15 @@ struct EncodedLossyCandidate {
     probabilities: CoeffProbTables,
     modes: Vec<MacroblockMode>,
     token_partition: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LossySearchProfile {
+    fast_mode_search: bool,
+    allow_i4x4: bool,
+    refine_coeffs: bool,
+    refine_y2: bool,
+    update_probabilities: bool,
 }
 
 fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), EncoderError> {
@@ -221,6 +230,46 @@ fn heuristic_filter(base_quant: i32) -> FilterConfig {
         simple: false,
         level,
         sharpness: 0,
+    }
+}
+
+fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
+    match optimization_level {
+        0 => LossySearchProfile {
+            fast_mode_search: true,
+            allow_i4x4: false,
+            refine_coeffs: false,
+            refine_y2: false,
+            update_probabilities: false,
+        },
+        1 | 2 => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: false,
+            refine_coeffs: false,
+            refine_y2: false,
+            update_probabilities: true,
+        },
+        3 | 4 => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: true,
+            refine_coeffs: false,
+            refine_y2: false,
+            update_probabilities: true,
+        },
+        5 | 6 | 7 => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: true,
+            refine_coeffs: true,
+            refine_y2: false,
+            update_probabilities: true,
+        },
+        _ => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: true,
+            refine_coeffs: true,
+            refine_y2: true,
+            update_probabilities: true,
+        },
     }
 }
 
@@ -1331,6 +1380,78 @@ fn refine_y2_levels_greedy(
     coeffs
 }
 
+fn maybe_refine_levels(
+    profile: &LossySearchProfile,
+    source: &[u8],
+    source_stride: usize,
+    x: usize,
+    y: usize,
+    prediction: &[u8; 16],
+    probabilities: &CoeffProbTables,
+    coeff_type: usize,
+    ctx: usize,
+    first: usize,
+    dc_quant: u16,
+    ac_quant: u16,
+    lambda: u32,
+    levels: &mut [i16; 16],
+) -> [i16; 16] {
+    if profile.refine_coeffs {
+        refine_levels_greedy(
+            source,
+            source_stride,
+            x,
+            y,
+            prediction,
+            probabilities,
+            coeff_type,
+            ctx,
+            first,
+            dc_quant,
+            ac_quant,
+            lambda,
+            levels,
+        )
+    } else {
+        dequantize_levels(levels, dc_quant, ac_quant)
+    }
+}
+
+fn maybe_refine_y2_levels(
+    profile: &LossySearchProfile,
+    source: &[u8],
+    source_stride: usize,
+    x: usize,
+    y: usize,
+    prediction: &[u8; 256],
+    ac_coeffs: &[[i16; 16]; 16],
+    probabilities: &CoeffProbTables,
+    ctx: usize,
+    dc_quant: u16,
+    ac_quant: u16,
+    lambda: u32,
+    levels: &mut [i16; 16],
+) -> [i16; 16] {
+    if profile.refine_y2 {
+        refine_y2_levels_greedy(
+            source,
+            source_stride,
+            x,
+            y,
+            prediction,
+            ac_coeffs,
+            probabilities,
+            ctx,
+            dc_quant,
+            ac_quant,
+            lambda,
+            levels,
+        )
+    } else {
+        dequantize_levels(levels, dc_quant, ac_quant)
+    }
+}
+
 fn rd_score(distortion: u64, rate: u32, lambda: u32) -> u64 {
     distortion * 256 + u64::from(rate) * u64::from(lambda.max(1))
 }
@@ -1445,6 +1566,7 @@ fn evaluate_luma_mode(
     reconstructed: &Planes,
     mb_x: usize,
     mb_y: usize,
+    profile: &LossySearchProfile,
     quant: &QuantMatrices,
     rd: &RdMultipliers,
     probabilities: &CoeffProbTables,
@@ -1493,7 +1615,8 @@ fn evaluate_luma_mode(
             let (mut levels, _) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
             let prediction_block = copy_block4_from_buffer(&prediction, 16, sub_x * 4, sub_y * 4);
             let ctx = (l + (refine_tnz & 1)) as usize;
-            let coeffs = refine_levels_greedy(
+            let coeffs = maybe_refine_levels(
+                profile,
                 &source.y,
                 source.y_stride,
                 x + sub_x * 4,
@@ -1522,7 +1645,8 @@ fn evaluate_luma_mode(
     let mut prediction16 = [0u8; 256];
     prediction16.copy_from_slice(&prediction);
     let (mut y2_levels, _) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
-    let y2_coeffs = refine_y2_levels_greedy(
+    let y2_coeffs = maybe_refine_y2_levels(
+        profile,
         &source.y,
         source.y_stride,
         x,
@@ -1580,6 +1704,7 @@ fn evaluate_luma4_mode(
     reconstructed: &mut Planes,
     mb_x: usize,
     mb_y: usize,
+    profile: &LossySearchProfile,
     quant: &QuantMatrices,
     rd: &RdMultipliers,
     probabilities: &CoeffProbTables,
@@ -1646,7 +1771,8 @@ fn evaluate_luma4_mode(
                 let prediction_block =
                     copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
                 let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
-                let dequantized = refine_levels_greedy(
+                let dequantized = maybe_refine_levels(
+                    profile,
                     &source.y,
                     source.y_stride,
                     block_x,
@@ -1737,6 +1863,7 @@ fn evaluate_chroma_mode(
     reconstructed: &Planes,
     mb_x: usize,
     mb_y: usize,
+    profile: &LossySearchProfile,
     quant: &QuantMatrices,
     rd: &RdMultipliers,
     probabilities: &CoeffProbTables,
@@ -1791,7 +1918,8 @@ fn evaluate_chroma_mode(
                 copy_block4_from_buffer(&prediction_u, 8, sub_x * 4, sub_y * 4);
             let (mut levels_u, _) = quantize_block(&coeffs_u, quant.uv[0], quant.uv[1], 0);
             let ctx = (l + (tnz_u & 1)) as usize;
-            let coeffs_u = refine_levels_greedy(
+            let coeffs_u = maybe_refine_levels(
+                profile,
                 &source.u,
                 source.uv_stride,
                 x + sub_x * 4,
@@ -1835,7 +1963,8 @@ fn evaluate_chroma_mode(
                 copy_block4_from_buffer(&prediction_v, 8, sub_x * 4, sub_y * 4);
             let (mut levels_v, _) = quantize_block(&coeffs_v, quant.uv[0], quant.uv[1], 0);
             let ctx = (l + (tnz_v & 1)) as usize;
-            let coeffs_v = refine_levels_greedy(
+            let coeffs_v = maybe_refine_levels(
+                profile,
                 &source.v,
                 source.uv_stride,
                 x + sub_x * 4,
@@ -1866,11 +1995,70 @@ fn evaluate_chroma_mode(
         + u64::from(uv_mode_rate(mode)) * u64::from(rd.mode.max(1))
 }
 
+fn fast_luma_predictor_score(
+    source: &Planes,
+    reconstructed: &Planes,
+    mb_x: usize,
+    mb_y: usize,
+    mode: u8,
+) -> u64 {
+    let x = mb_x * 16;
+    let y = mb_y * 16;
+    let mut prediction = [0u8; 16 * 16];
+    fill_prediction_block::<16>(
+        &reconstructed.y,
+        reconstructed.y_stride,
+        reconstructed.y_stride,
+        x,
+        y,
+        mode,
+        &mut prediction,
+        16,
+    );
+    block_sse(&source.y, source.y_stride, x, y, &prediction, 16, 16, 16)
+}
+
+fn fast_chroma_predictor_score(
+    source: &Planes,
+    reconstructed: &Planes,
+    mb_x: usize,
+    mb_y: usize,
+    mode: u8,
+) -> u64 {
+    let x = mb_x * 8;
+    let y = mb_y * 8;
+    let mut prediction_u = [0u8; 8 * 8];
+    let mut prediction_v = [0u8; 8 * 8];
+    fill_prediction_block::<8>(
+        &reconstructed.u,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        x,
+        y,
+        mode,
+        &mut prediction_u,
+        8,
+    );
+    fill_prediction_block::<8>(
+        &reconstructed.v,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        x,
+        y,
+        mode,
+        &mut prediction_v,
+        8,
+    );
+    block_sse(&source.u, source.uv_stride, x, y, &prediction_u, 8, 8, 8)
+        + block_sse(&source.v, source.uv_stride, x, y, &prediction_v, 8, 8, 8)
+}
+
 fn choose_macroblock_mode(
     source: &Planes,
     reconstructed: &mut Planes,
     mb_x: usize,
     mb_y: usize,
+    profile: &LossySearchProfile,
     quant: &QuantMatrices,
     rd: &RdMultipliers,
     probabilities: &CoeffProbTables,
@@ -1881,6 +2069,36 @@ fn choose_macroblock_mode(
 ) -> MacroblockMode {
     const MODES: [u8; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 
+    if profile.fast_mode_search {
+        let mut best_luma = DC_PRED;
+        let mut best_luma_score = u64::MAX;
+        for mode in MODES {
+            let score = fast_luma_predictor_score(source, reconstructed, mb_x, mb_y, mode);
+            if score < best_luma_score {
+                best_luma = mode;
+                best_luma_score = score;
+            }
+        }
+
+        let mut best_chroma = DC_PRED;
+        let mut best_chroma_score = u64::MAX;
+        for mode in MODES {
+            let score = fast_chroma_predictor_score(source, reconstructed, mb_x, mb_y, mode);
+            if score < best_chroma_score {
+                best_chroma = mode;
+                best_chroma_score = score;
+            }
+        }
+
+        return MacroblockMode {
+            luma: best_luma,
+            sub_luma: [B_DC_PRED; 16],
+            chroma: best_chroma,
+            segment: 0,
+            skip: false,
+        };
+    }
+
     let mut best_luma = DC_PRED;
     let mut best_luma_score = u64::MAX;
     for mode in MODES {
@@ -1889,6 +2107,7 @@ fn choose_macroblock_mode(
             reconstructed,
             mb_x,
             mb_y,
+            profile,
             quant,
             rd,
             probabilities,
@@ -1902,21 +2121,26 @@ fn choose_macroblock_mode(
         }
     }
 
-    let (i4_score, sub_luma) = evaluate_luma4_mode(
-        source,
-        reconstructed,
-        mb_x,
-        mb_y,
-        quant,
-        rd,
-        probabilities,
-        top_context,
-        left_context,
-        top_modes,
-        left_modes,
-    );
-    let (best_luma, sub_luma) = if i4_score < best_luma_score {
-        (B_PRED, sub_luma)
+    let (best_luma, sub_luma) = if profile.allow_i4x4 {
+        let (i4_score, sub_luma) = evaluate_luma4_mode(
+            source,
+            reconstructed,
+            mb_x,
+            mb_y,
+            profile,
+            quant,
+            rd,
+            probabilities,
+            top_context,
+            left_context,
+            top_modes,
+            left_modes,
+        );
+        if i4_score < best_luma_score {
+            (B_PRED, sub_luma)
+        } else {
+            (best_luma, [B_DC_PRED; 16])
+        }
     } else {
         (best_luma, [B_DC_PRED; 16])
     };
@@ -1929,6 +2153,7 @@ fn choose_macroblock_mode(
             reconstructed,
             mb_x,
             mb_y,
+            profile,
             quant,
             rd,
             probabilities,
@@ -2551,6 +2776,7 @@ fn encode_macroblock(
     reconstructed: &mut Planes,
     mb_x: usize,
     mb_y: usize,
+    profile: &LossySearchProfile,
     mode: MacroblockMode,
     quant: &QuantMatrices,
     top: &mut NonZeroContext,
@@ -2622,7 +2848,8 @@ fn encode_macroblock(
                 );
                 let ctx = ((left.nz >> sub_y) & 1) as usize + ((top.nz >> sub_x) & 1) as usize;
                 let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
-                let coeffs = refine_levels_greedy(
+                let coeffs = maybe_refine_levels(
+                    profile,
                     &source.y,
                     source.y_stride,
                     block_x,
@@ -2675,7 +2902,8 @@ fn encode_macroblock(
                 );
                 let (mut levels, _) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
                 let ctx = (l + (refine_tnz & 1)) as usize;
-                let coeffs = refine_levels_greedy(
+                let coeffs = maybe_refine_levels(
+                    profile,
                     &source.y,
                     source.y_stride,
                     y_x + sub_x * 4,
@@ -2703,7 +2931,8 @@ fn encode_macroblock(
         let y2_input = forward_wht(&y_dc);
         let prediction_block = copy_block16(&reconstructed.y, reconstructed.y_stride, y_x, y_y);
         let (mut levels, _) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
-        let y2_coeffs = refine_y2_levels_greedy(
+        let y2_coeffs = maybe_refine_y2_levels(
+            profile,
             &source.y,
             source.y_stride,
             y_x,
@@ -2744,7 +2973,8 @@ fn encode_macroblock(
                 uv_y + sub_y * 4,
             );
             let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
-            let coeffs = refine_levels_greedy(
+            let coeffs = maybe_refine_levels(
+                profile,
                 &source.u,
                 source.uv_stride,
                 uv_x + sub_x * 4,
@@ -2784,7 +3014,8 @@ fn encode_macroblock(
                 uv_y + sub_y * 4,
             );
             let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
-            let coeffs = refine_levels_greedy(
+            let coeffs = maybe_refine_levels(
+                profile,
                 &source.v,
                 source.uv_stride,
                 uv_x + sub_x * 4,
@@ -2971,6 +3202,7 @@ fn encode_token_partition(
     source: &Planes,
     mb_width: usize,
     mb_height: usize,
+    profile: &LossySearchProfile,
     segment: &SegmentConfig,
     segment_quants: &[QuantMatrices; NUM_MB_SEGMENTS],
     probabilities: &CoeffProbTables,
@@ -2999,6 +3231,7 @@ fn encode_token_partition(
                 &mut reconstructed,
                 mb_x,
                 mb_y,
+                profile,
                 quant,
                 &rd,
                 probabilities,
@@ -3016,6 +3249,7 @@ fn encode_token_partition(
                 &mut reconstructed,
                 mb_x,
                 mb_y,
+                profile,
                 mode,
                 quant,
                 &mut top_contexts[mb_x],
@@ -3088,33 +3322,50 @@ fn encode_lossy_candidate(
     source: &Planes,
     mb_width: usize,
     mb_height: usize,
+    profile: &LossySearchProfile,
     segment: &SegmentConfig,
 ) -> Result<EncodedLossyCandidate, EncoderError> {
     let segment_quants = build_segment_quantizers(segment);
-    let mut stats = [[[[0u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
-    let (initial_partition, _, initial_modes) = encode_token_partition(
-        source,
-        mb_width,
-        mb_height,
-        segment,
-        &segment_quants,
-        &COEFFS_PROBA0,
-        Some(&mut stats),
-    );
-    let probabilities = finalize_token_probabilities(&stats);
-    let (token_partition, modes) = if probabilities == COEFFS_PROBA0 {
-        (initial_partition, initial_modes)
+    let (token_partition, probabilities, modes) = if profile.update_probabilities {
+        let mut stats = [[[[0u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
+        let (initial_partition, _, initial_modes) = encode_token_partition(
+            source,
+            mb_width,
+            mb_height,
+            profile,
+            segment,
+            &segment_quants,
+            &COEFFS_PROBA0,
+            Some(&mut stats),
+        );
+        let probabilities = finalize_token_probabilities(&stats);
+        if probabilities == COEFFS_PROBA0 {
+            (initial_partition, probabilities, initial_modes)
+        } else {
+            let (token_partition, _, modes) = encode_token_partition(
+                source,
+                mb_width,
+                mb_height,
+                profile,
+                segment,
+                &segment_quants,
+                &probabilities,
+                None,
+            );
+            (token_partition, probabilities, modes)
+        }
     } else {
         let (token_partition, _, modes) = encode_token_partition(
             source,
             mb_width,
             mb_height,
+            profile,
             segment,
             &segment_quants,
-            &probabilities,
+            &COEFFS_PROBA0,
             None,
         );
-        (token_partition, modes)
+        (token_partition, COEFFS_PROBA0, modes)
     };
     Ok(EncodedLossyCandidate {
         base_quant: segment.quantizer[0],
@@ -3176,6 +3427,7 @@ pub fn encode_lossy_rgba_to_vp8_with_options(
     let mb_width = (width + 15) >> 4;
     let mb_height = (height + 15) >> 4;
     let base_quant = base_quantizer_from_quality(options.quality);
+    let profile = lossy_search_profile(options.optimization_level);
     let source = rgba_to_yuv420(width, height, rgba, mb_width, mb_height);
     let candidates = build_segment_candidates(
         &source,
@@ -3186,7 +3438,7 @@ pub fn encode_lossy_rgba_to_vp8_with_options(
     );
     let mut best = None;
     for segment in &candidates {
-        let candidate = encode_lossy_candidate(&source, mb_width, mb_height, segment)?;
+        let candidate = encode_lossy_candidate(&source, mb_width, mb_height, &profile, segment)?;
         let vp8 = finalize_lossy_candidate(
             width,
             height,
@@ -3316,9 +3568,11 @@ mod tests {
         let mb_height = (height + 15) >> 4;
         let options = LossyEncodingOptions::default();
         let base_quant = base_quantizer_from_quality(options.quality);
+        let profile = lossy_search_profile(options.optimization_level);
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
         let segment = disabled_segment_config(mb_width * mb_height, clipped_quantizer(base_quant));
-        let candidate = encode_lossy_candidate(&source, mb_width, mb_height, &segment).unwrap();
+        let candidate =
+            encode_lossy_candidate(&source, mb_width, mb_height, &profile, &segment).unwrap();
         let partition0 = encode_partition0(
             mb_width,
             mb_height,
@@ -3338,6 +3592,7 @@ mod tests {
             &source,
             mb_width,
             mb_height,
+            &profile,
             &segment,
             &build_segment_quantizers(&segment),
             &candidate.probabilities,
@@ -3376,6 +3631,7 @@ mod tests {
 
         let quant = build_quant_matrices(base_quantizer_from_quality(90));
         let rd = build_rd_multipliers(&quant);
+        let profile = lossy_search_profile(MAX_LOSSY_OPTIMIZATION_LEVEL);
         let top_modes = [B_DC_PRED; 4];
         let left_modes = [B_DC_PRED; 4];
         let top_context = NonZeroContext::default();
@@ -3385,6 +3641,7 @@ mod tests {
             &mut reconstructed,
             0,
             1,
+            &profile,
             &quant,
             &rd,
             &COEFFS_PROBA0,
@@ -3429,7 +3686,7 @@ mod tests {
             mb_width,
             mb_height,
             13,
-            DEFAULT_LOSSY_OPTIMIZATION_LEVEL,
+            MAX_LOSSY_OPTIMIZATION_LEVEL,
         );
 
         assert!(candidates.iter().any(|candidate| candidate.use_segment));

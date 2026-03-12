@@ -54,7 +54,7 @@ Advanced encoder tuning stays in the `encoder` module:
 ```rust
 let lossy_options = webp_rust::LossyEncodingOptions {
     quality: 90,
-    optimization_level: 4,
+    optimization_level: 0,
 };
 let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif(
     &image,
@@ -111,6 +111,8 @@ Lossy:
 ```bash
 cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
 ```
+
+This default lossy path uses `-z 0` for fast encode speed.
 
 Heavier lossy search:
 
