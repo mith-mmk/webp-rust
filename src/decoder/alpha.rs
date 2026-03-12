@@ -1,3 +1,5 @@
+//! Alpha-plane parsing and reconstruction helpers.
+
 use crate::decoder::lossless::decode_lossless_vp8l_to_argb;
 use crate::decoder::DecoderError;
 
@@ -10,13 +12,18 @@ const ALPHA_FILTER_HORIZONTAL: u8 = 1;
 const ALPHA_FILTER_VERTICAL: u8 = 2;
 const ALPHA_FILTER_GRADIENT: u8 = 3;
 
+/// Parsed one-byte `ALPH` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlphaHeader {
+    /// Compression method.
     pub compression: u8,
+    /// Spatial filter method.
     pub filter: u8,
+    /// Alpha preprocessing mode.
     pub preprocessing: u8,
 }
 
+/// Parses the one-byte header that prefixes an `ALPH` payload.
 pub fn parse_alpha_header(data: &[u8]) -> Result<AlphaHeader, DecoderError> {
     let Some(&header) = data.first() else {
         return Err(DecoderError::NotEnoughData("ALPH header"));
@@ -124,6 +131,9 @@ fn unfilter_alpha(
     Ok(decoded)
 }
 
+/// Decodes an `ALPH` payload to a single-channel alpha plane.
+///
+/// The returned buffer contains one alpha byte per pixel in row-major order.
 pub fn decode_alpha_plane(
     data: &[u8],
     width: usize,
@@ -163,6 +173,7 @@ pub fn decode_alpha_plane(
     }
 }
 
+/// Replaces the alpha channel of an RGBA image with a decoded alpha plane.
 pub fn apply_alpha_plane(rgba: &mut [u8], alpha: &[u8]) -> Result<(), DecoderError> {
     let expected_len = alpha
         .len()

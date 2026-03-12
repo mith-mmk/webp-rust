@@ -1,3 +1,5 @@
+//! Lower-level WebP parsing and decoding APIs.
+
 pub mod alpha;
 pub mod animation;
 pub mod header;
@@ -27,11 +29,16 @@ pub use vp8::{
 };
 pub use vp8i::WebpFormat;
 
+/// Error type used by decoding and parsing entry points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderError {
+    /// A caller-provided buffer size or dimension is invalid.
     InvalidParam(&'static str),
+    /// The input ended before a required structure was fully available.
     NotEnoughData(&'static str),
+    /// The bitstream violates the WebP container or codec format.
     Bitstream(&'static str),
+    /// The input uses a feature that is intentionally not implemented.
     Unsupported(&'static str),
 }
 

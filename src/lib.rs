@@ -1,6 +1,16 @@
+//! webp-rust::decoder is rust native of Webp Image Decoder
+//! This library is based on the official WebP decoder in C, and it is implemented in Rust. It supports both lossy and lossless WebP formats, as well as animated WebP. The decoder can be used to decode WebP images into RGBA format, and it also provides functions to decode alpha planes and animation frames.
+
+//! Pure Rust WebP decoder.
+//!
+//! The crate exposes a small top-level API for decoding still images to RGBA
+//! and a lower-level [`decoder`] module for container parsing and animation
+//! decoding.
+
 type Error = Box<dyn std::error::Error>;
 use bin_rs::reader::{BinaryReader, BytesReader};
 
+/// Lower-level WebP parsing and decoding APIs.
 pub mod decoder;
 
 const MB_FEATURE_TREE_PROBS: usize = 3;
@@ -100,62 +110,101 @@ const AC_TABLE: [u16; 128] = [
     209, 213, 217, 221, 225, 229, 234, 239, 245, 249, 254, 259, 264, 269, 274, 279, 284,
 ];
 
+/// Global animation parameters stored in the `ANIM` chunk.
 pub struct AnimationControl {
+    /// Canvas background color in little-endian ARGB order.
     pub backgroud_color: u32,
+    /// Loop count from the container. `0` means infinite loop.
     pub loop_count: u16,
 }
 
+/// RGBA pixel buffer for a decoded still image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBuffer {
+    /// Image width in pixels.
     pub width: usize,
+    /// Image height in pixels.
     pub height: usize,
+    /// Packed RGBA8 pixels in row-major order.
     pub rgba: Vec<u8>,
 }
 
 impl ImageBuffer {
+    /// Returns the image width in pixels.
     pub fn get_width(self) -> usize {
         self.width
     }
 
+    /// Returns the image height in pixels.
     pub fn get_height(self) -> usize {
         self.height
     }
 
+    /// Returns the packed RGBA8 buffer.
     pub fn buffer(self) -> Vec<u8> {
         self.rgba.clone()
     }
 }
 
+/// One animation frame entry parsed from an `ANMF` chunk.
 pub struct AnimationFrame {
+    /// Frame x offset on the animation canvas in pixels.
     pub frame_x: usize,
+    /// Frame y offset on the animation canvas in pixels.
     pub frame_y: usize,
+    /// Frame width in pixels.
     pub width: usize,
+    /// Frame height in pixels.
     pub height: usize,
+    /// Frame duration in milliseconds.
     pub duration: usize,
+    /// Whether the frame should be alpha-blended onto the canvas.
     pub alpha_blending: bool,
+    /// Whether the frame should be disposed to background after display.
     pub disopse: bool,
+    /// Raw `VP8 ` or `VP8L` frame payload.
     pub frame: Vec<u8>,
+    /// Optional raw `ALPH` payload associated with the frame.
     pub alpha: Option<Vec<u8>>,
 }
 
+/// Container-level metadata returned by [`read_header`].
 pub struct WebpHeader {
+    /// Image width for still images.
     pub width: usize,
+    /// Image height for still images.
     pub height: usize,
+    /// Canvas width from `VP8X`, when present.
     pub canvas_width: usize,
+    /// Canvas height from `VP8X`, when present.
     pub canvas_height: usize,
+    /// Encoded size of the primary image chunk.
     pub image_chunksize: usize,
+    /// Whether an ICC profile is advertised.
     pub has_icc_profile: bool,
+    /// Whether alpha is advertised or present.
     pub has_alpha: bool,
+    /// Whether EXIF metadata is advertised.
     pub has_exif: bool,
+    /// Whether XMP metadata is advertised.
     pub has_xmp: bool,
+    /// Whether animation is advertised.
     pub has_animation: bool,
+    /// `true` for `VP8 `, `false` for `VP8L`.
     pub lossy: bool,
+    /// Raw primary image payload.
     pub image: Vec<u8>,
+    /// Optional ICC profile payload.
     pub icc_profile: Option<Vec<u8>>,
+    /// Optional still-image `ALPH` payload.
     pub alpha: Option<Vec<u8>>,
+    /// Optional EXIF payload.
     pub exif: Option<Vec<u8>>,
+    /// Optional XMP payload.
     pub xmp: Option<Vec<u8>>,
+    /// Optional animation control block.
     pub animation: Option<AnimationControl>,
+    /// Optional parsed animation frame entries.
     pub animation_frame: Option<Vec<AnimationFrame>>,
 }
 
@@ -184,6 +233,7 @@ impl WebpHeader {
     }
 }
 
+/// Reads a 24-bit little-endian integer from a [`BinaryReader`].
 pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     let mut b = [0_u8; 3];
     reader.read_bytes(&mut b)?;
@@ -191,6 +241,10 @@ pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     Ok(val)
 }
 
+/// Decodes a still WebP image from memory into an RGBA buffer.
+///
+/// Animated WebP is rejected by this helper. Use
+/// [`decoder::decode_animation_webp`] for animated input.
 pub fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, decoder::DecoderError> {
     let features = decoder::get_features(data)?;
     if features.has_animation {
@@ -217,6 +271,7 @@ pub fn image_from_bytes(data: &[u8]) -> Result<ImageBuffer, decoder::DecoderErro
 }
 
 #[cfg(not(target_family = "wasm"))]
+/// Reads a still WebP image from disk and decodes it to RGBA.
 pub fn image_from_file(filename: String) -> Result<ImageBuffer, Error> {
     let data = std::fs::read(filename)?;
     Ok(image_from_bytes(&data)?)
@@ -250,6 +305,10 @@ fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>
 }
 
 // RIFF Decode
+/// Parses the RIFF container and returns raw chunk-oriented metadata.
+///
+/// This is a legacy low-level parser. For actual pixel decode, prefer
+/// [`image_from_bytes`] or the functions in [`decoder`].
 pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error> {
     let riff = reader.read_ascii_string(4)?;
     if riff != "RIFF" {

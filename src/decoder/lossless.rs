@@ -1,3 +1,5 @@
+//! Lossless `VP8L` decode helpers.
+
 use std::collections::HashMap;
 
 use crate::decoder::header::parse_still_webp;
@@ -929,6 +931,7 @@ pub(crate) fn decode_lossless_vp8l_to_argb(
     Ok((info.width, info.height, argb))
 }
 
+/// Decodes a raw `VP8L` frame payload to RGBA.
 pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let (width, height, argb) = decode_lossless_vp8l_to_argb(data)?;
 
@@ -939,6 +942,7 @@ pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, Decoder
     })
 }
 
+/// Decodes a still lossless WebP container to RGBA.
 pub fn decode_lossless_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let parsed = parse_still_webp(data)?;
     if parsed.features.format != WebpFormat::Lossless {

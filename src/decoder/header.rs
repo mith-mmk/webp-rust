@@ -1,3 +1,5 @@
+//! WebP RIFF container and chunk parsing helpers.
+
 use crate::decoder::alpha::{parse_alpha_header, AlphaHeader};
 use crate::decoder::vp8::{get_info, get_lossless_info};
 use crate::decoder::vp8i::{
@@ -6,71 +8,118 @@ use crate::decoder::vp8i::{
 };
 use crate::decoder::DecoderError;
 
+/// Common metadata for a RIFF chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkHeader {
+    /// FourCC tag.
     pub fourcc: [u8; 4],
+    /// Chunk start offset in the source buffer.
     pub offset: usize,
+    /// Unpadded payload size.
     pub size: usize,
+    /// Payload size including RIFF padding.
     pub padded_size: usize,
+    /// Start offset of the chunk payload.
     pub data_offset: usize,
 }
 
+/// Parsed `VP8X` extended header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vp8xHeader {
+    /// Raw feature flags from the header.
     pub flags: u32,
+    /// Canvas width in pixels.
     pub canvas_width: usize,
+    /// Canvas height in pixels.
     pub canvas_height: usize,
 }
 
+/// High-level image features derived from the container and bitstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpFeatures {
+    /// Image or canvas width in pixels.
     pub width: usize,
+    /// Image or canvas height in pixels.
     pub height: usize,
+    /// Whether alpha is present.
     pub has_alpha: bool,
+    /// Whether the container is animated.
     pub has_animation: bool,
+    /// Underlying still-image codec kind.
     pub format: WebpFormat,
+    /// Optional extended header.
     pub vp8x: Option<Vp8xHeader>,
 }
 
+/// Parsed still-image WebP container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedWebp<'a> {
+    /// High-level image features.
     pub features: WebpFeatures,
+    /// RIFF size field when the input is RIFF-wrapped.
     pub riff_size: Option<usize>,
+    /// Primary image chunk header.
     pub image_chunk: ChunkHeader,
+    /// Primary image payload (`VP8 ` or `VP8L`).
     pub image_data: &'a [u8],
+    /// Optional `ALPH` chunk header.
     pub alpha_chunk: Option<ChunkHeader>,
+    /// Optional `ALPH` payload.
     pub alpha_data: Option<&'a [u8]>,
+    /// Optional parsed `ALPH` header byte.
     pub alpha_header: Option<AlphaHeader>,
 }
 
+/// Parsed `ANIM` chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationHeader {
+    /// Canvas background color in little-endian ARGB order.
     pub background_color: u32,
+    /// Loop count from the container. `0` means infinite loop.
     pub loop_count: u16,
 }
 
+/// Parsed animation frame entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedAnimationFrame<'a> {
+    /// Enclosing `ANMF` chunk header.
     pub frame_chunk: ChunkHeader,
+    /// X offset on the canvas in pixels.
     pub x_offset: usize,
+    /// Y offset on the canvas in pixels.
     pub y_offset: usize,
+    /// Frame width in pixels.
     pub width: usize,
+    /// Frame height in pixels.
     pub height: usize,
+    /// Display duration in milliseconds.
     pub duration: usize,
+    /// Whether the frame should be alpha-blended.
     pub blend: bool,
+    /// Whether the frame should be disposed to background.
     pub dispose_to_background: bool,
+    /// Embedded `VP8 ` or `VP8L` image chunk.
     pub image_chunk: ChunkHeader,
+    /// Embedded image payload.
     pub image_data: &'a [u8],
+    /// Optional embedded `ALPH` chunk header.
     pub alpha_chunk: Option<ChunkHeader>,
+    /// Optional embedded `ALPH` payload.
     pub alpha_data: Option<&'a [u8]>,
+    /// Optional parsed `ALPH` header byte.
     pub alpha_header: Option<AlphaHeader>,
 }
 
+/// Parsed animated WebP container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAnimationWebp<'a> {
+    /// High-level canvas features.
     pub features: WebpFeatures,
+    /// RIFF size field.
     pub riff_size: Option<usize>,
+    /// Global animation settings.
     pub animation: AnimationHeader,
+    /// Parsed animation frames in display order.
     pub frames: Vec<ParsedAnimationFrame<'a>>,
 }
 
@@ -179,6 +228,7 @@ fn parse_vp8x(data: &[u8], offset: usize) -> Result<(Option<Vp8xHeader>, usize),
     ))
 }
 
+/// Returns high-level WebP features without fully decoding the image.
 pub fn get_features(data: &[u8]) -> Result<WebpFeatures, DecoderError> {
     let (riff_size, mut offset) = parse_riff(data)?;
     let riff_limit = riff_size.map(|size| size + CHUNK_HEADER_SIZE);
@@ -259,6 +309,7 @@ pub fn get_features(data: &[u8]) -> Result<WebpFeatures, DecoderError> {
     })
 }
 
+/// Parses a still-image WebP container and returns raw chunk slices.
 pub fn parse_still_webp(data: &[u8]) -> Result<ParsedWebp<'_>, DecoderError> {
     let (riff_size, mut offset) = parse_riff(data)?;
     let riff_limit = riff_size.map(|size| size + CHUNK_HEADER_SIZE);
@@ -391,6 +442,7 @@ fn parse_animation_frame<'a>(
     })
 }
 
+/// Parses an animated WebP container and returns frame-level chunk slices.
 pub fn parse_animation_webp(data: &[u8]) -> Result<ParsedAnimationWebp<'_>, DecoderError> {
     let (riff_size, mut offset) = parse_riff(data)?;
     let riff_limit = riff_size.map(|size| size + CHUNK_HEADER_SIZE);

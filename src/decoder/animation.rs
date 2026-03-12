@@ -1,20 +1,31 @@
+//! Animated WebP decode and compositing helpers.
+
 use crate::decoder::header::{parse_animation_webp, ParsedAnimationFrame};
 use crate::decoder::lossless::decode_lossless_vp8l_to_rgba;
 use crate::decoder::lossy::{decode_lossy_vp8_frame_to_rgba, DecodedImage};
 use crate::decoder::DecoderError;
 
+/// One fully composited animation frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedAnimationFrame {
+    /// Display duration in milliseconds.
     pub duration: usize,
+    /// Packed RGBA8 canvas pixels after compositing this frame.
     pub rgba: Vec<u8>,
 }
 
+/// Decoded animated WebP sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedAnimation {
+    /// Canvas width in pixels.
     pub width: usize,
+    /// Canvas height in pixels.
     pub height: usize,
+    /// Canvas background color in little-endian ARGB order.
     pub background_color: u32,
+    /// Loop count from the container. `0` means infinite loop.
     pub loop_count: u16,
+    /// Composited frames in display order.
     pub frames: Vec<DecodedAnimationFrame>,
 }
 
@@ -128,6 +139,7 @@ fn decode_frame_image(frame: &ParsedAnimationFrame<'_>) -> Result<DecodedImage, 
     Ok(image)
 }
 
+/// Decodes an animated WebP container to a sequence of composited RGBA frames.
 pub fn decode_animation_webp(data: &[u8]) -> Result<DecodedAnimation, DecoderError> {
     let parsed = parse_animation_webp(data)?;
     let background = argb_to_rgba(parsed.animation.background_color);

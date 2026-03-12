@@ -1,3 +1,5 @@
+//! Lossy `VP8` decode helpers.
+
 use crate::decoder::alpha::{apply_alpha_plane, decode_alpha_plane};
 use crate::decoder::header::parse_still_webp;
 use crate::decoder::vp8::{parse_macroblock_data, FilterType, MacroBlockData, MacroBlockDataFrame};
@@ -21,21 +23,33 @@ const RGB_B_BIAS: i32 = 17_685;
 const YUV_FIX2: i32 = 6;
 const YUV_MASK2: i32 = (256 << YUV_FIX2) - 1;
 
+/// Decoded RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedImage {
+    /// Image width in pixels.
     pub width: usize,
+    /// Image height in pixels.
     pub height: usize,
+    /// Packed RGBA8 pixels in row-major order.
     pub rgba: Vec<u8>,
 }
 
+/// Decoded YUV420 image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedYuvImage {
+    /// Image width in pixels.
     pub width: usize,
+    /// Image height in pixels.
     pub height: usize,
+    /// Y plane stride in bytes.
     pub y_stride: usize,
+    /// U and V plane stride in bytes.
     pub uv_stride: usize,
+    /// Y plane data.
     pub y: Vec<u8>,
+    /// U plane data.
     pub u: Vec<u8>,
+    /// V plane data.
     pub v: Vec<u8>,
 }
 
@@ -1347,12 +1361,14 @@ fn into_decoded_yuv(planes: Planes) -> DecodedYuvImage {
     }
 }
 
+/// Decodes a raw `VP8 ` frame payload to planar YUV420.
 pub fn decode_lossy_vp8_to_yuv(data: &[u8]) -> Result<DecodedYuvImage, DecoderError> {
     let frame = parse_macroblock_data(data)?;
     let planes = reconstruct_planes(&frame)?;
     Ok(into_decoded_yuv(planes))
 }
 
+/// Decodes a raw `VP8 ` frame payload to RGBA.
 pub fn decode_lossy_vp8_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let yuv = decode_lossy_vp8_to_yuv(data)?;
     Ok(DecodedImage {
@@ -1389,6 +1405,10 @@ pub(crate) fn decode_lossy_vp8_frame_to_rgba(
     Ok(image)
 }
 
+/// Decodes a still lossy WebP container to RGBA.
+///
+/// If an `ALPH` chunk is present, it is decoded and applied to the returned
+/// RGBA buffer.
 pub fn decode_lossy_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let parsed = parse_still_webp(data)?;
     if parsed.features.format != WebpFormat::Lossy {
@@ -1399,6 +1419,10 @@ pub fn decode_lossy_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderErr
     decode_lossy_vp8_frame_to_rgba(parsed.image_data, parsed.alpha_data)
 }
 
+/// Decodes a still lossy WebP container to planar YUV420.
+///
+/// This helper rejects input with alpha because the return type has no alpha
+/// channel.
 pub fn decode_lossy_webp_to_yuv(data: &[u8]) -> Result<DecodedYuvImage, DecoderError> {
     let parsed = parse_still_webp(data)?;
     if parsed.features.format != WebpFormat::Lossy {
