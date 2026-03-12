@@ -329,6 +329,14 @@ fn lossless_search_profile(optimization_level: u8) -> LosslessSearchProfile {
     }
 }
 
+fn lossless_candidate_profiles(optimization_level: u8) -> Vec<LosslessSearchProfile> {
+    match optimization_level {
+        8 => vec![lossless_search_profile(7)],
+        9 => vec![lossless_search_profile(7), lossless_search_profile(9)],
+        _ => vec![lossless_search_profile(optimization_level)],
+    }
+}
+
 fn rgba_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff)
 }
@@ -3298,35 +3306,49 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     validate_rgba(width, height, rgba)?;
     validate_options(options)?;
 
-    let profile = lossless_search_profile(options.optimization_level);
     let argb = rgba_to_argb(rgba);
     let subtract_green = apply_subtract_green_transform(&argb);
-    let mut best = if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
-        Some(encode_palette_candidate_to_vp8l(
-            width, height, rgba, &candidate, &profile,
-        )?)
-    } else {
-        None
-    };
+    let mut best = None;
 
-    let plans = collect_transform_plans(width, height, &argb, &subtract_green, &profile);
-    let ranked_plans = shortlist_transform_plans(width, plans, &profile)?;
-    for (estimate, plan) in ranked_plans {
-        if best
-            .as_ref()
-            .map(|encoded| should_stop_transform_search(encoded.len(), estimate, &profile))
-            .unwrap_or(false)
-        {
-            break;
+    for profile in lossless_candidate_profiles(options.optimization_level) {
+        let mut profile_best =
+            if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
+                Some(encode_palette_candidate_to_vp8l(
+                    width, height, rgba, &candidate, &profile,
+                )?)
+            } else {
+                None
+            };
+
+        let plans = collect_transform_plans(width, height, &argb, &subtract_green, &profile);
+        let ranked_plans = shortlist_transform_plans(width, plans, &profile)?;
+        for (estimate, plan) in ranked_plans {
+            if profile_best
+                .as_ref()
+                .map(|encoded| should_stop_transform_search(encoded.len(), estimate, &profile))
+                .unwrap_or(false)
+            {
+                break;
+            }
+
+            let encoded = encode_transform_plan_to_vp8l(width, height, rgba, &plan, &profile)?;
+            if profile_best
+                .as_ref()
+                .map(|current| encoded.len() < current.len())
+                .unwrap_or(true)
+            {
+                profile_best = Some(encoded);
+            }
         }
 
-        let encoded = encode_transform_plan_to_vp8l(width, height, rgba, &plan, &profile)?;
-        if best
-            .as_ref()
-            .map(|current| encoded.len() < current.len())
-            .unwrap_or(true)
-        {
-            best = Some(encoded);
+        if let Some(encoded) = profile_best {
+            if best
+                .as_ref()
+                .map(|current: &Vec<u8>| encoded.len() < current.len())
+                .unwrap_or(true)
+            {
+                best = Some(encoded);
+            }
         }
     }
 
