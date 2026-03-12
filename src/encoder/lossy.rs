@@ -1,9 +1,10 @@
+use crate::decoder::decode_lossy_vp8_to_yuv;
 use crate::decoder::quant::{AC_TABLE, DC_TABLE};
 use crate::decoder::tree::{BMODES_PROBA, COEFFS_PROBA0, COEFFS_UPDATE_PROBA, Y_MODES_INTRA4};
 use crate::decoder::vp8i::{
     B_DC_PRED, B_HD_PRED, B_HE_PRED, B_HU_PRED, B_LD_PRED, B_PRED, B_RD_PRED, B_TM_PRED, B_VE_PRED,
-    B_VL_PRED, B_VR_PRED, DC_PRED, H_PRED, NUM_BANDS, NUM_BMODES, NUM_CTX, NUM_PROBAS, NUM_TYPES,
-    TM_PRED, V_PRED,
+    B_VL_PRED, B_VR_PRED, DC_PRED, H_PRED, MB_FEATURE_TREE_PROBS, NUM_BANDS, NUM_BMODES, NUM_CTX,
+    NUM_MB_SEGMENTS, NUM_PROBAS, NUM_TYPES, TM_PRED, V_PRED,
 };
 use crate::encoder::container::{wrap_still_webp, StillImageChunk};
 use crate::encoder::vp8_bool_writer::Vp8BoolWriter;
@@ -27,16 +28,27 @@ const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
 type CoeffProbTables = [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 type CoeffStats = [[[[u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 
+const DEFAULT_LOSSY_OPTIMIZATION_LEVEL: u8 = 4;
+const MAX_LOSSY_OPTIMIZATION_LEVEL: u8 = 9;
+
 /// Lossy encoder tuning knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LossyEncodingOptions {
     /// Quality from `0` to `100`.
     pub quality: u8,
+    /// Search effort from `0` to `9`.
+    ///
+    /// The default `4` keeps encode time moderate. `9` enables the heaviest
+    /// search profile currently implemented.
+    pub optimization_level: u8,
 }
 
 impl Default for LossyEncodingOptions {
     fn default() -> Self {
-        Self { quality: 90 }
+        Self {
+            quality: 90,
+            optimization_level: DEFAULT_LOSSY_OPTIMIZATION_LEVEL,
+        }
     }
 }
 
@@ -51,6 +63,7 @@ struct MacroblockMode {
     luma: u8,
     sub_luma: [u8; 16],
     chroma: u8,
+    segment: u8,
     skip: bool,
 }
 
@@ -61,6 +74,14 @@ struct QuantMatrices {
     uv: [u16; 2],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RdMultipliers {
+    i16: u32,
+    i4: u32,
+    uv: u32,
+    mode: u32,
+}
+
 #[derive(Debug, Clone)]
 struct Planes {
     y_stride: usize,
@@ -68,6 +89,32 @@ struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct SegmentConfig {
+    use_segment: bool,
+    update_map: bool,
+    quantizer: [u8; NUM_MB_SEGMENTS],
+    filter_strength: [i8; NUM_MB_SEGMENTS],
+    probs: [u8; MB_FEATURE_TREE_PROBS],
+    segments: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FilterConfig {
+    simple: bool,
+    level: u8,
+    sharpness: u8,
+}
+
+#[derive(Debug, Clone)]
+struct EncodedLossyCandidate {
+    base_quant: u8,
+    segment: SegmentConfig,
+    probabilities: CoeffProbTables,
+    modes: Vec<MacroblockMode>,
+    token_partition: Vec<u8>,
 }
 
 fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), EncoderError> {
@@ -104,6 +151,11 @@ fn validate_options(options: &LossyEncodingOptions) -> Result<(), EncoderError> 
             "lossy quality must be in 0..=100",
         ));
     }
+    if options.optimization_level > MAX_LOSSY_OPTIMIZATION_LEVEL {
+        return Err(EncoderError::InvalidParam(
+            "lossy optimization level must be in 0..=9",
+        ));
+    }
     Ok(())
 }
 
@@ -120,6 +172,101 @@ fn build_quant_matrices(base_q: i32) -> QuantMatrices {
             ((AC_TABLE[q] as u32 * 101_581) >> 16).max(8) as u16,
         ],
         uv: [DC_TABLE[q.min(117)] as u16, AC_TABLE[q]],
+    }
+}
+
+fn build_rd_multipliers(quant: &QuantMatrices) -> RdMultipliers {
+    let q_i4 = u32::from(quant.y1[1].max(8));
+    let q_i16 = u32::from(quant.y2[1].max(8));
+    let q_uv = u32::from(quant.uv[1].max(8));
+    RdMultipliers {
+        i16: ((3 * q_i16 * q_i16).max(128)) >> 0,
+        i4: ((3 * q_i4 * q_i4).max(128)) >> 7,
+        uv: ((3 * q_uv * q_uv).max(128)) >> 6,
+        mode: (q_i4 * q_i4).max(128) >> 7,
+    }
+}
+
+fn clipped_quantizer(value: i32) -> u8 {
+    value.clamp(0, 127) as u8
+}
+
+fn filter_candidates(base_quant: i32) -> Vec<FilterConfig> {
+    let mut levels = vec![
+        0u8,
+        clipped_quantizer((base_quant + 1) / 2).min(63),
+        clipped_quantizer(base_quant).min(63),
+        clipped_quantizer((base_quant * 3 + 1) / 2).min(63),
+        clipped_quantizer(base_quant * 2).min(63),
+    ];
+    levels.sort_unstable();
+    levels.dedup();
+    levels
+        .into_iter()
+        .map(|level| FilterConfig {
+            simple: false,
+            level,
+            sharpness: 0,
+        })
+        .collect()
+}
+
+fn heuristic_filter(base_quant: i32) -> FilterConfig {
+    let level = if base_quant <= 10 {
+        0
+    } else {
+        clipped_quantizer((base_quant * 3 + 2) / 4).min(63)
+    };
+    FilterConfig {
+        simple: false,
+        level,
+        sharpness: 0,
+    }
+}
+
+fn use_exhaustive_segment_search(optimization_level: u8) -> bool {
+    optimization_level >= 9
+}
+
+fn use_exhaustive_filter_search(optimization_level: u8, mb_count: usize) -> bool {
+    if optimization_level >= 9 {
+        return true;
+    }
+    if optimization_level >= 6 {
+        return mb_count < 2_048;
+    }
+    mb_count < 1_024
+}
+
+fn segment_with_uniform_filter(segment: &SegmentConfig, level: u8) -> SegmentConfig {
+    let mut filtered = segment.clone();
+    if filtered.use_segment {
+        filtered.filter_strength[..].fill(level as i8);
+    }
+    filtered
+}
+
+fn get_proba(a: usize, b: usize) -> u8 {
+    let total = a + b;
+    if total == 0 {
+        255
+    } else {
+        ((255 * a + total / 2) / total) as u8
+    }
+}
+
+fn build_segment_quantizers(segment: &SegmentConfig) -> [QuantMatrices; NUM_MB_SEGMENTS] {
+    std::array::from_fn(|index| build_quant_matrices(segment.quantizer[index] as i32))
+}
+
+fn disabled_segment_config(mb_count: usize, base_quant: u8) -> SegmentConfig {
+    SegmentConfig {
+        use_segment: false,
+        update_map: false,
+        quantizer: [base_quant; NUM_MB_SEGMENTS],
+        filter_strength: [0; NUM_MB_SEGMENTS],
+        probs: [255; MB_FEATURE_TREE_PROBS],
+        segments: vec![0; mb_count],
     }
 }
 
@@ -206,6 +353,222 @@ fn empty_reconstructed_planes(mb_width: usize, mb_height: usize) -> Planes {
         u: vec![0; uv_stride * uv_height],
         v: vec![0; uv_stride * uv_height],
     }
+}
+
+fn macroblock_activity(source: &Planes, mb_x: usize, mb_y: usize) -> u32 {
+    let x0 = mb_x * 16;
+    let y0 = mb_y * 16;
+    let mut activity = 0u32;
+
+    for row in 0..16 {
+        let row_offset = (y0 + row) * source.y_stride + x0;
+        let pixels = &source.y[row_offset..row_offset + 16];
+        for col in 1..16 {
+            activity += pixels[col].abs_diff(pixels[col - 1]) as u32;
+        }
+        if row > 0 {
+            let prev_offset = (y0 + row - 1) * source.y_stride + x0;
+            let prev = &source.y[prev_offset..prev_offset + 16];
+            for col in 0..16 {
+                activity += pixels[col].abs_diff(prev[col]) as u32;
+            }
+        }
+    }
+
+    activity
+}
+
+fn build_segment_probs(counts: &[usize; NUM_MB_SEGMENTS]) -> [u8; MB_FEATURE_TREE_PROBS] {
+    [
+        get_proba(counts[0] + counts[1], counts[2] + counts[3]),
+        get_proba(counts[0], counts[1]),
+        get_proba(counts[2], counts[3]),
+    ]
+}
+
+fn build_segment_config(
+    activities: &[u32],
+    sorted_activities: &[u32],
+    flat_percent: usize,
+    flat_delta: i32,
+    detail_delta: i32,
+    base_quant: i32,
+) -> Option<SegmentConfig> {
+    if activities.len() < 8 {
+        return None;
+    }
+    let flat_count = (activities.len() * flat_percent / 100).clamp(1, activities.len() - 1);
+    let threshold = sorted_activities[flat_count - 1];
+
+    let mut segments = vec![0u8; activities.len()];
+    let mut counts = [0usize; NUM_MB_SEGMENTS];
+    for (index, &activity) in activities.iter().enumerate() {
+        let segment = if activity <= threshold { 0 } else { 1 };
+        segments[index] = segment;
+        counts[segment as usize] += 1;
+    }
+    if counts[0] == 0 || counts[1] == 0 {
+        return None;
+    }
+
+    let quant0 = clipped_quantizer(base_quant + flat_delta);
+    let quant1 = clipped_quantizer(base_quant + detail_delta);
+    if quant0 == quant1 {
+        return None;
+    }
+
+    let probs = build_segment_probs(&counts);
+    let update_map = probs.iter().any(|&prob| prob != 255);
+    if !update_map {
+        return None;
+    }
+
+    let mut quantizer = [quant0; NUM_MB_SEGMENTS];
+    quantizer[1] = quant1;
+    Some(SegmentConfig {
+        use_segment: true,
+        update_map,
+        quantizer,
+        filter_strength: [0; NUM_MB_SEGMENTS],
+        probs,
+        segments,
+    })
+}
+
+fn build_multi_segment_config(
+    activities: &[u32],
+    sorted_activities: &[u32],
+    percentiles: &[usize],
+    deltas: &[i32],
+    base_quant: i32,
+) -> Option<SegmentConfig> {
+    let segment_count = deltas.len();
+    if !(2..=NUM_MB_SEGMENTS).contains(&segment_count) || percentiles.len() + 1 != segment_count {
+        return None;
+    }
+
+    let mut thresholds = Vec::with_capacity(percentiles.len());
+    for &percentile in percentiles {
+        let split = (activities.len() * percentile / 100).clamp(1, activities.len() - 1);
+        thresholds.push(sorted_activities[split - 1]);
+    }
+    thresholds.sort_unstable();
+
+    let mut segments = vec![0u8; activities.len()];
+    let mut counts = [0usize; NUM_MB_SEGMENTS];
+    for (index, &activity) in activities.iter().enumerate() {
+        let segment = thresholds.partition_point(|&threshold| activity > threshold);
+        segments[index] = segment as u8;
+        counts[segment] += 1;
+    }
+
+    if counts[..segment_count].iter().any(|&count| count == 0) {
+        return None;
+    }
+
+    let mut quantizer = [clipped_quantizer(base_quant); NUM_MB_SEGMENTS];
+    let mut distinct = false;
+    for (index, &delta) in deltas.iter().enumerate() {
+        quantizer[index] = clipped_quantizer(base_quant + delta);
+        if index > 0 && quantizer[index] != quantizer[index - 1] {
+            distinct = true;
+        }
+    }
+    if !distinct {
+        return None;
+    }
+
+    let probs = build_segment_probs(&counts);
+    let update_map = probs.iter().any(|&prob| prob != 255);
+    if !update_map {
+        return None;
+    }
+
+    Some(SegmentConfig {
+        use_segment: true,
+        update_map,
+        quantizer,
+        filter_strength: [0; NUM_MB_SEGMENTS],
+        probs,
+        segments,
+    })
+}
+
+fn build_segment_candidates(
+    source: &Planes,
+    mb_width: usize,
+    mb_height: usize,
+    base_quant: i32,
+    optimization_level: u8,
+) -> Vec<SegmentConfig> {
+    let mb_count = mb_width * mb_height;
+    let mut candidates = vec![disabled_segment_config(
+        mb_count,
+        clipped_quantizer(base_quant),
+    )];
+    if mb_count < 8 || optimization_level == 0 {
+        return candidates;
+    }
+
+    let mut activities = Vec::with_capacity(mb_count);
+    for mb_y in 0..mb_height {
+        for mb_x in 0..mb_width {
+            activities.push(macroblock_activity(source, mb_x, mb_y));
+        }
+    }
+    let mut sorted = activities.clone();
+    sorted.sort_unstable();
+
+    if !use_exhaustive_segment_search(optimization_level) && mb_count >= 1_024 {
+        if let Some(config) = build_segment_config(&activities, &sorted, 65, 12, -2, base_quant) {
+            return vec![config];
+        }
+        return candidates;
+    }
+
+    let two_segment_presets: &[(usize, i32, i32)] = if optimization_level <= 2 {
+        &[(65usize, 12i32, -2i32)]
+    } else if mb_count >= 2_048 && !use_exhaustive_segment_search(optimization_level) {
+        &[(65usize, 12i32, -2i32), (55, 10, 0)]
+    } else {
+        &[(55usize, 10i32, 0i32), (65, 12, -2), (45, 8, 0)]
+    };
+    for &(flat_percent, flat_delta, detail_delta) in two_segment_presets {
+        if let Some(config) = build_segment_config(
+            &activities,
+            &sorted,
+            flat_percent,
+            flat_delta,
+            detail_delta,
+            base_quant,
+        ) {
+            candidates.push(config);
+        }
+    }
+
+    if optimization_level >= 4
+        && (use_exhaustive_segment_search(optimization_level) || mb_count < 2_048)
+    {
+        for (percentiles, deltas) in [
+            (&[35usize, 72usize][..], &[12i32, 4i32, -4i32][..]),
+            (
+                &[25usize, 50usize, 78usize][..],
+                &[16i32, 8i32, 1i32, -7i32][..],
+            ),
+            (
+                &[30usize, 58usize, 84usize][..],
+                &[18i32, 10i32, 2i32, -8i32][..],
+            ),
+        ] {
+            if let Some(config) =
+                build_multi_segment_config(&activities, &sorted, percentiles, deltas, base_quant)
+            {
+                candidates.push(config);
+            }
+        }
+    }
+
+    candidates
 }
 
 fn clip_byte(value: i32) -> u8 {
@@ -576,6 +939,15 @@ fn restore_block4(plane: &mut [u8], stride: usize, x: usize, y: usize, block: &[
     }
 }
 
+fn copy_block4_from_buffer(buffer: &[u8], stride: usize, x: usize, y: usize) -> [u8; 16] {
+    let mut block = [0u8; 16];
+    for row in 0..4 {
+        let src = (y + row) * stride + x;
+        block[row * 4..row * 4 + 4].copy_from_slice(&buffer[src..src + 4]);
+    }
+    block
+}
+
 fn copy_block16(plane: &[u8], stride: usize, x: usize, y: usize) -> [u8; 256] {
     let mut block = [0u8; 256];
     for row in 0..16 {
@@ -802,13 +1174,199 @@ fn quantize_block(
     (levels, dequantized)
 }
 
-fn non_zero_count(levels: &[i16; 16], first: usize) -> u64 {
-    levels
-        .iter()
-        .enumerate()
-        .skip(first)
-        .filter(|(_, coeff)| **coeff != 0)
-        .count() as u64
+fn dequantize_levels(levels: &[i16; 16], dc_quant: u16, ac_quant: u16) -> [i16; 16] {
+    let mut dequantized = [0i16; 16];
+    for (index, level) in levels.iter().copied().enumerate() {
+        let quant = if index == 0 { dc_quant } else { ac_quant } as i32;
+        dequantized[index] = (i32::from(level) * quant) as i16;
+    }
+    dequantized
+}
+
+fn reconstruct_from_prediction(prediction: &[u8; 16], coeffs: &[i16; 16]) -> [u8; 16] {
+    let mut block = *prediction;
+    add_transform(&mut block, 4, 0, 0, coeffs);
+    block
+}
+
+fn block_sse_4x4(source: &[u8], stride: usize, x: usize, y: usize, candidate: &[u8; 16]) -> u64 {
+    let mut sse = 0u64;
+    for row in 0..4 {
+        let src_offset = (y + row) * stride + x;
+        let cand_offset = row * 4;
+        for col in 0..4 {
+            let diff = source[src_offset + col] as i32 - candidate[cand_offset + col] as i32;
+            sse += (diff * diff) as u64;
+        }
+    }
+    sse
+}
+
+fn reconstruct_luma16_from_prediction(
+    prediction: &[u8; 256],
+    ac_coeffs: &[[i16; 16]; 16],
+    y2_coeffs: &[i16; 16],
+) -> ([u8; 256], [i16; 16]) {
+    let mut candidate = *prediction;
+    let y2_dc = inverse_wht(y2_coeffs);
+    for block in 0..16 {
+        let mut coeffs = ac_coeffs[block];
+        coeffs[0] = y2_dc[block];
+        let sub_x = (block & 3) * 4;
+        let sub_y = (block >> 2) * 4;
+        add_transform(&mut candidate, 16, sub_x, sub_y, &coeffs);
+    }
+    (candidate, y2_dc)
+}
+
+fn refine_levels_greedy(
+    source: &[u8],
+    source_stride: usize,
+    x: usize,
+    y: usize,
+    prediction: &[u8; 16],
+    probabilities: &CoeffProbTables,
+    coeff_type: usize,
+    ctx: usize,
+    first: usize,
+    dc_quant: u16,
+    ac_quant: u16,
+    lambda: u32,
+    levels: &mut [i16; 16],
+) -> [i16; 16] {
+    let mut coeffs = dequantize_levels(levels, dc_quant, ac_quant);
+    let mut candidate = reconstruct_from_prediction(prediction, &coeffs);
+    let mut best_score = rd_score(
+        block_sse_4x4(source, source_stride, x, y, &candidate),
+        coefficients_rate(probabilities, coeff_type, ctx, first, levels),
+        lambda,
+    );
+
+    for scan in (first..16).rev() {
+        let index = ZIGZAG[scan];
+        while levels[index] != 0 {
+            let current = levels[index];
+            let next = if current > 0 {
+                current - 1
+            } else {
+                current + 1
+            };
+            let mut trial_levels = *levels;
+            trial_levels[index] = next;
+            let trial_coeffs = dequantize_levels(&trial_levels, dc_quant, ac_quant);
+            let trial_candidate = reconstruct_from_prediction(prediction, &trial_coeffs);
+            let trial_score = rd_score(
+                block_sse_4x4(source, source_stride, x, y, &trial_candidate),
+                coefficients_rate(probabilities, coeff_type, ctx, first, &trial_levels),
+                lambda,
+            );
+            if trial_score <= best_score {
+                *levels = trial_levels;
+                coeffs = trial_coeffs;
+                candidate = trial_candidate;
+                best_score = trial_score;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let _ = candidate;
+    coeffs
+}
+
+fn refine_y2_levels_greedy(
+    source: &[u8],
+    source_stride: usize,
+    x: usize,
+    y: usize,
+    prediction: &[u8; 256],
+    ac_coeffs: &[[i16; 16]; 16],
+    probabilities: &CoeffProbTables,
+    ctx: usize,
+    dc_quant: u16,
+    ac_quant: u16,
+    lambda: u32,
+    levels: &mut [i16; 16],
+) -> [i16; 16] {
+    let mut coeffs = dequantize_levels(levels, dc_quant, ac_quant);
+    let (mut candidate, _) = reconstruct_luma16_from_prediction(prediction, ac_coeffs, &coeffs);
+    let mut best_score = rd_score(
+        block_sse(source, source_stride, x, y, &candidate, 16, 16, 16),
+        coefficients_rate(probabilities, 1, ctx, 0, levels),
+        lambda,
+    );
+
+    for scan in (0..16).rev() {
+        let index = ZIGZAG[scan];
+        while levels[index] != 0 {
+            let current = levels[index];
+            let next = if current > 0 {
+                current - 1
+            } else {
+                current + 1
+            };
+            let mut trial_levels = *levels;
+            trial_levels[index] = next;
+            let trial_coeffs = dequantize_levels(&trial_levels, dc_quant, ac_quant);
+            let (trial_candidate, _) =
+                reconstruct_luma16_from_prediction(prediction, ac_coeffs, &trial_coeffs);
+            let trial_score = rd_score(
+                block_sse(source, source_stride, x, y, &trial_candidate, 16, 16, 16),
+                coefficients_rate(probabilities, 1, ctx, 0, &trial_levels),
+                lambda,
+            );
+            if trial_score <= best_score {
+                *levels = trial_levels;
+                coeffs = trial_coeffs;
+                candidate = trial_candidate;
+                best_score = trial_score;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let _ = candidate;
+    coeffs
+}
+
+fn rd_score(distortion: u64, rate: u32, lambda: u32) -> u64 {
+    distortion * 256 + u64::from(rate) * u64::from(lambda.max(1))
+}
+
+fn i16_mode_rate(mode: u8) -> u32 {
+    let mut rate = bit_cost(true, 145);
+    match mode {
+        DC_PRED => {
+            rate += bit_cost(false, 156);
+            rate += bit_cost(false, 163);
+        }
+        V_PRED => {
+            rate += bit_cost(false, 156);
+            rate += bit_cost(true, 163);
+        }
+        H_PRED => {
+            rate += bit_cost(true, 156);
+            rate += bit_cost(false, 128);
+        }
+        TM_PRED => {
+            rate += bit_cost(true, 156);
+            rate += bit_cost(true, 128);
+        }
+        _ => unreachable!("unsupported luma mode"),
+    }
+    rate
+}
+
+fn uv_mode_rate(mode: u8) -> u32 {
+    match mode {
+        DC_PRED => bit_cost(false, 142),
+        V_PRED => bit_cost(true, 142) + bit_cost(false, 114),
+        H_PRED => bit_cost(true, 142) + bit_cost(true, 114) + bit_cost(false, 183),
+        TM_PRED => bit_cost(true, 142) + bit_cost(true, 114) + bit_cost(true, 183),
+        _ => unreachable!("unsupported chroma mode"),
+    }
 }
 
 fn block_sse(
@@ -833,8 +1391,53 @@ fn block_sse(
     sse
 }
 
-fn mode_score(distortion: u64, non_zero_count: u64, ac_quant: u16) -> u64 {
-    distortion + non_zero_count * u64::from(ac_quant.max(8)) * 8
+fn plane_sse_region(
+    source: &[u8],
+    source_stride: usize,
+    decoded: &[u8],
+    decoded_stride: usize,
+    width: usize,
+    height: usize,
+) -> u64 {
+    let mut sse = 0u64;
+    for row in 0..height {
+        let src_offset = row * source_stride;
+        let dec_offset = row * decoded_stride;
+        for col in 0..width {
+            let diff = source[src_offset + col] as i32 - decoded[dec_offset + col] as i32;
+            sse += (diff * diff) as u64;
+        }
+    }
+    sse
+}
+
+fn yuv_sse(source: &Planes, width: usize, height: usize, vp8: &[u8]) -> Result<u64, EncoderError> {
+    let decoded = decode_lossy_vp8_to_yuv(vp8)
+        .map_err(|_| EncoderError::Bitstream("internal filter evaluation decode failed"))?;
+    let uv_width = width.div_ceil(2);
+    let uv_height = height.div_ceil(2);
+    Ok(plane_sse_region(
+        &source.y,
+        source.y_stride,
+        &decoded.y,
+        decoded.y_stride,
+        width,
+        height,
+    ) + plane_sse_region(
+        &source.u,
+        source.uv_stride,
+        &decoded.u,
+        decoded.uv_stride,
+        uv_width,
+        uv_height,
+    ) + plane_sse_region(
+        &source.v,
+        source.uv_stride,
+        &decoded.v,
+        decoded.uv_stride,
+        uv_width,
+        uv_height,
+    ))
 }
 
 fn evaluate_luma_mode(
@@ -843,6 +1446,10 @@ fn evaluate_luma_mode(
     mb_x: usize,
     mb_y: usize,
     quant: &QuantMatrices,
+    rd: &RdMultipliers,
+    probabilities: &CoeffProbTables,
+    top: &NonZeroContext,
+    left: &NonZeroContext,
     mode: u8,
 ) -> u64 {
     let x = mb_x * 16;
@@ -861,9 +1468,13 @@ fn evaluate_luma_mode(
     let mut candidate = prediction;
     let mut y_dc = [0i16; 16];
     let mut y_coeffs = [[0i16; 16]; 16];
-    let mut non_zero = 0u64;
+    let mut y_levels = [[0i16; 16]; 16];
+    let mut rate = 0u32;
+    let mut refine_tnz = top.nz & 0x0f;
+    let mut refine_lnz = left.nz & 0x0f;
 
     for sub_y in 0..4 {
+        let mut l = refine_lnz & 1;
         for sub_x in 0..4 {
             let block = sub_y * 4 + sub_x;
             let coeffs = forward_transform_at(
@@ -879,18 +1490,78 @@ fn evaluate_luma_mode(
             y_dc[block] = coeffs[0];
             let mut ac_only = coeffs;
             ac_only[0] = 0;
-            let (levels, coeffs) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
-            non_zero += non_zero_count(&levels, 1);
+            let (mut levels, _) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
+            let prediction_block = copy_block4_from_buffer(&prediction, 16, sub_x * 4, sub_y * 4);
+            let ctx = (l + (refine_tnz & 1)) as usize;
+            let coeffs = refine_levels_greedy(
+                &source.y,
+                source.y_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction_block,
+                probabilities,
+                0,
+                ctx,
+                1,
+                quant.y1[0],
+                quant.y1[1],
+                rd.i16,
+                &mut levels,
+            );
+            y_levels[block] = levels;
             y_coeffs[block] = coeffs;
+            let has_ac = block_has_non_zero(&y_levels[block], 1) as u8;
+            l = has_ac;
+            refine_tnz = (refine_tnz >> 1) | (has_ac << 7);
         }
+        refine_tnz >>= 4;
+        refine_lnz = (refine_lnz >> 1) | (l << 7);
     }
 
     let y2_input = forward_wht(&y_dc);
-    let (y2_levels, y2_coeffs) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
-    non_zero += non_zero_count(&y2_levels, 0);
+    let mut prediction16 = [0u8; 256];
+    prediction16.copy_from_slice(&prediction);
+    let (mut y2_levels, _) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
+    let y2_coeffs = refine_y2_levels_greedy(
+        &source.y,
+        source.y_stride,
+        x,
+        y,
+        &prediction16,
+        &y_coeffs,
+        probabilities,
+        (top.nz_dc + left.nz_dc) as usize,
+        quant.y2[0],
+        quant.y2[1],
+        rd.i16,
+        &mut y2_levels,
+    );
+    rate += coefficients_rate(
+        probabilities,
+        1,
+        (top.nz_dc + left.nz_dc) as usize,
+        0,
+        &y2_levels,
+    );
     let y2_dc = inverse_wht(&y2_coeffs);
     for block in 0..16 {
         y_coeffs[block][0] = y2_dc[block];
+    }
+
+    let mut tnz = top.nz & 0x0f;
+    let mut lnz = left.nz & 0x0f;
+    for sub_y in 0..4 {
+        let mut l = lnz & 1;
+        for sub_x in 0..4 {
+            let block = sub_y * 4 + sub_x;
+            let ctx = (l + (tnz & 1)) as usize;
+            rate += coefficients_rate(probabilities, 0, ctx, 1, &y_levels[block]);
+            let has_ac = block_has_non_zero(&y_levels[block], 1) as u8;
+            l = has_ac;
+            tnz = (tnz >> 1) | (has_ac << 7);
+        }
+        tnz >>= 4;
+        lnz = (lnz >> 1) | (l << 7);
     }
 
     for sub_y in 0..4 {
@@ -901,7 +1572,7 @@ fn evaluate_luma_mode(
     }
 
     let distortion = block_sse(&source.y, source.y_stride, x, y, &candidate, 16, 16, 16);
-    mode_score(distortion, non_zero, quant.y1[1])
+    rd_score(distortion, rate, rd.i16) + u64::from(i16_mode_rate(mode)) * u64::from(rd.mode.max(1))
 }
 
 fn evaluate_luma4_mode(
@@ -910,6 +1581,10 @@ fn evaluate_luma4_mode(
     mb_x: usize,
     mb_y: usize,
     quant: &QuantMatrices,
+    rd: &RdMultipliers,
+    probabilities: &CoeffProbTables,
+    top_context: &NonZeroContext,
+    left_context: &NonZeroContext,
     top_modes: &[u8],
     left_modes: &[u8; 4],
 ) -> (u64, [u8; 16]) {
@@ -926,19 +1601,24 @@ fn evaluate_luma4_mode(
     let mut local_top = [B_DC_PRED; 4];
     local_top.copy_from_slice(top_modes);
     let mut local_left = *left_modes;
+    let mut tnz = top_context.nz & 0x0f;
+    let mut lnz = left_context.nz & 0x0f;
 
     for sub_y in 0..4 {
         let mut left_mode = local_left[sub_y];
+        let mut l = lnz & 1;
         for sub_x in 0..4 {
             let block = sub_y * 4 + sub_x;
             let block_x = x + sub_x * 4;
             let block_y = y + sub_y * 4;
             let top_mode = local_top[sub_x];
             let original = copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
+            let ctx = (l + (tnz & 1)) as usize;
 
             let mut best_mode = B_DC_PRED;
             let mut best_coeffs = [0i16; 16];
             let mut best_score = u64::MAX;
+            let mut best_non_zero = 0u8;
             for mode in MODES {
                 restore_block4(
                     &mut reconstructed.y,
@@ -963,7 +1643,24 @@ fn evaluate_luma4_mode(
                     block_x,
                     block_y,
                 );
-                let (levels, dequantized) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
+                let prediction_block =
+                    copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
+                let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
+                let dequantized = refine_levels_greedy(
+                    &source.y,
+                    source.y_stride,
+                    block_x,
+                    block_y,
+                    &prediction_block,
+                    probabilities,
+                    3,
+                    ctx,
+                    0,
+                    quant.y1[0],
+                    quant.y1[1],
+                    rd.i4,
+                    &mut levels,
+                );
                 add_transform(
                     &mut reconstructed.y,
                     reconstructed.y_stride,
@@ -981,12 +1678,15 @@ fn evaluate_luma4_mode(
                     4,
                     4,
                 );
-                let score = mode_score(distortion, non_zero_count(&levels, 0), quant.y1[1])
-                    + intra4_mode_cost(top_mode, left_mode, mode, quant.y1[1]);
+                let coeff_rate = coefficients_rate(probabilities, 3, ctx, 0, &levels);
+                let score = rd_score(distortion, coeff_rate, rd.i4)
+                    + u64::from(intra4_mode_rate(top_mode, left_mode, mode))
+                        * u64::from(rd.mode.max(1));
                 if score < best_score {
                     best_mode = mode;
                     best_coeffs = dequantized;
                     best_score = score;
+                    best_non_zero = block_has_non_zero(&levels, 0) as u8;
                 }
             }
 
@@ -1017,12 +1717,19 @@ fn evaluate_luma4_mode(
             total_score += best_score;
             local_top[sub_x] = best_mode;
             left_mode = best_mode;
+            l = best_non_zero;
+            tnz = (tnz >> 1) | (best_non_zero << 7);
         }
+        tnz >>= 4;
+        lnz = (lnz >> 1) | (l << 7);
         local_left[sub_y] = left_mode;
     }
 
     restore_block16(&mut reconstructed.y, reconstructed.y_stride, x, y, &backup);
-    (total_score, sub_modes)
+    (
+        total_score + u64::from(bit_cost(false, 145)) * u64::from(rd.mode.max(1)),
+        sub_modes,
+    )
 }
 
 fn evaluate_chroma_mode(
@@ -1031,6 +1738,10 @@ fn evaluate_chroma_mode(
     mb_x: usize,
     mb_y: usize,
     quant: &QuantMatrices,
+    rd: &RdMultipliers,
+    probabilities: &CoeffProbTables,
+    top: &NonZeroContext,
+    left: &NonZeroContext,
     mode: u8,
 ) -> u64 {
     let x = mb_x * 8;
@@ -1059,9 +1770,12 @@ fn evaluate_chroma_mode(
     );
     let mut candidate_u = prediction_u;
     let mut candidate_v = prediction_v;
-    let mut non_zero = 0u64;
+    let mut rate = 0u32;
+    let mut tnz_u = top.nz >> 4;
+    let mut lnz_u = left.nz >> 4;
 
     for sub_y in 0..2 {
+        let mut l = lnz_u & 1;
         for sub_x in 0..2 {
             let coeffs_u = forward_transform_at(
                 &source.u,
@@ -1073,10 +1787,40 @@ fn evaluate_chroma_mode(
                 sub_x * 4,
                 sub_y * 4,
             );
-            let (levels_u, coeffs_u) = quantize_block(&coeffs_u, quant.uv[0], quant.uv[1], 0);
-            non_zero += non_zero_count(&levels_u, 0);
+            let prediction_block_u =
+                copy_block4_from_buffer(&prediction_u, 8, sub_x * 4, sub_y * 4);
+            let (mut levels_u, _) = quantize_block(&coeffs_u, quant.uv[0], quant.uv[1], 0);
+            let ctx = (l + (tnz_u & 1)) as usize;
+            let coeffs_u = refine_levels_greedy(
+                &source.u,
+                source.uv_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction_block_u,
+                probabilities,
+                2,
+                ctx,
+                0,
+                quant.uv[0],
+                quant.uv[1],
+                rd.uv,
+                &mut levels_u,
+            );
+            let has_coeffs = block_has_non_zero(&levels_u, 0) as u8;
+            rate += coefficients_rate(probabilities, 2, ctx, 0, &levels_u);
+            l = has_coeffs;
+            tnz_u = (tnz_u >> 1) | (has_coeffs << 3);
             add_transform(&mut candidate_u, 8, sub_x * 4, sub_y * 4, &coeffs_u);
+        }
+        tnz_u >>= 2;
+        lnz_u = (lnz_u >> 1) | (l << 5);
+    }
 
+    let mut tnz_v = top.nz >> 6;
+    let mut lnz_v = left.nz >> 6;
+    for sub_y in 0..2 {
+        let mut l = lnz_v & 1;
+        for sub_x in 0..2 {
             let coeffs_v = forward_transform_at(
                 &source.v,
                 source.uv_stride,
@@ -1087,15 +1831,39 @@ fn evaluate_chroma_mode(
                 sub_x * 4,
                 sub_y * 4,
             );
-            let (levels_v, coeffs_v) = quantize_block(&coeffs_v, quant.uv[0], quant.uv[1], 0);
-            non_zero += non_zero_count(&levels_v, 0);
+            let prediction_block_v =
+                copy_block4_from_buffer(&prediction_v, 8, sub_x * 4, sub_y * 4);
+            let (mut levels_v, _) = quantize_block(&coeffs_v, quant.uv[0], quant.uv[1], 0);
+            let ctx = (l + (tnz_v & 1)) as usize;
+            let coeffs_v = refine_levels_greedy(
+                &source.v,
+                source.uv_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction_block_v,
+                probabilities,
+                2,
+                ctx,
+                0,
+                quant.uv[0],
+                quant.uv[1],
+                rd.uv,
+                &mut levels_v,
+            );
+            let has_coeffs = block_has_non_zero(&levels_v, 0) as u8;
+            rate += coefficients_rate(probabilities, 2, ctx, 0, &levels_v);
+            l = has_coeffs;
+            tnz_v = (tnz_v >> 1) | (has_coeffs << 3);
             add_transform(&mut candidate_v, 8, sub_x * 4, sub_y * 4, &coeffs_v);
         }
+        tnz_v >>= 2;
+        lnz_v = (lnz_v >> 1) | (l << 5);
     }
 
     let distortion_u = block_sse(&source.u, source.uv_stride, x, y, &candidate_u, 8, 8, 8);
     let distortion_v = block_sse(&source.v, source.uv_stride, x, y, &candidate_v, 8, 8, 8);
-    mode_score(distortion_u + distortion_v, non_zero, quant.uv[1])
+    rd_score(distortion_u + distortion_v, rate, rd.uv)
+        + u64::from(uv_mode_rate(mode)) * u64::from(rd.mode.max(1))
 }
 
 fn choose_macroblock_mode(
@@ -1104,6 +1872,10 @@ fn choose_macroblock_mode(
     mb_x: usize,
     mb_y: usize,
     quant: &QuantMatrices,
+    rd: &RdMultipliers,
+    probabilities: &CoeffProbTables,
+    top_context: &NonZeroContext,
+    left_context: &NonZeroContext,
     top_modes: &[u8],
     left_modes: &[u8; 4],
 ) -> MacroblockMode {
@@ -1112,7 +1884,18 @@ fn choose_macroblock_mode(
     let mut best_luma = DC_PRED;
     let mut best_luma_score = u64::MAX;
     for mode in MODES {
-        let score = evaluate_luma_mode(source, reconstructed, mb_x, mb_y, quant, mode);
+        let score = evaluate_luma_mode(
+            source,
+            reconstructed,
+            mb_x,
+            mb_y,
+            quant,
+            rd,
+            probabilities,
+            top_context,
+            left_context,
+            mode,
+        );
         if score < best_luma_score {
             best_luma = mode;
             best_luma_score = score;
@@ -1125,6 +1908,10 @@ fn choose_macroblock_mode(
         mb_x,
         mb_y,
         quant,
+        rd,
+        probabilities,
+        top_context,
+        left_context,
         top_modes,
         left_modes,
     );
@@ -1137,7 +1924,18 @@ fn choose_macroblock_mode(
     let mut best_chroma = DC_PRED;
     let mut best_chroma_score = u64::MAX;
     for mode in MODES {
-        let score = evaluate_chroma_mode(source, reconstructed, mb_x, mb_y, quant, mode);
+        let score = evaluate_chroma_mode(
+            source,
+            reconstructed,
+            mb_x,
+            mb_y,
+            quant,
+            rd,
+            probabilities,
+            top_context,
+            left_context,
+            mode,
+        );
         if score < best_chroma_score {
             best_chroma = mode;
             best_chroma_score = score;
@@ -1148,6 +1946,7 @@ fn choose_macroblock_mode(
         luma: best_luma,
         sub_luma,
         chroma: best_chroma,
+        segment: 0,
         skip: false,
     }
 }
@@ -1205,10 +2004,12 @@ fn encode_intra4_mode(writer: &mut Vp8BoolWriter, top_mode: u8, left_mode: u8, m
     });
 }
 
-fn intra4_mode_cost(top_mode: u8, left_mode: u8, mode: u8, ac_quant: u16) -> u64 {
-    let mut branches = 0u64;
-    walk_intra4_mode_bits(top_mode, left_mode, mode, &mut |_, _| branches += 1);
-    branches * u64::from(ac_quant.max(8)) * 2
+fn intra4_mode_rate(top_mode: u8, left_mode: u8, mode: u8) -> u32 {
+    let mut rate = 0u32;
+    walk_intra4_mode_bits(top_mode, left_mode, mode, &mut |bit, prob| {
+        rate += bit_cost(bit, prob);
+    });
+    rate
 }
 
 fn update_mode_cache(mode: &MacroblockMode, top: &mut [u8], left: &mut [u8; 4]) {
@@ -1289,6 +2090,123 @@ fn write_large_value(writer: &mut Vp8BoolWriter, value: u32, probs: &[u8; 11]) {
         writer.put_bit((residue & mask) != 0, prob);
         mask >>= 1;
     }
+}
+
+fn large_value_rate(value: u32, probs: &[u8; 11]) -> u32 {
+    let mut rate = 0;
+    if value <= 4 {
+        rate += bit_cost(false, probs[3]);
+        let not_two = value != 2;
+        rate += bit_cost(not_two, probs[4]);
+        if not_two {
+            rate += bit_cost(value == 4, probs[5]);
+        }
+        return rate;
+    }
+
+    rate += bit_cost(true, probs[3]);
+    if value <= 10 {
+        rate += bit_cost(false, probs[6]);
+        let gt6 = value > 6;
+        rate += bit_cost(gt6, probs[7]);
+        if !gt6 {
+            rate += bit_cost(value == 6, 159);
+        } else {
+            rate += bit_cost(value >= 9, 165);
+            rate += bit_cost((value & 1) == 0, 145);
+        }
+        return rate;
+    }
+
+    rate += bit_cost(true, probs[6]);
+    if value < 19 {
+        rate += bit_cost(false, probs[8]);
+        rate += bit_cost(false, probs[9]);
+        let residue = value - 11;
+        let mut mask = 1 << 2;
+        for &prob in CAT3.iter().take_while(|&&prob| prob != 0) {
+            rate += bit_cost((residue & mask) != 0, prob);
+            mask >>= 1;
+        }
+    } else if value < 35 {
+        rate += bit_cost(false, probs[8]);
+        rate += bit_cost(true, probs[9]);
+        let residue = value - 19;
+        let mut mask = 1 << 3;
+        for &prob in CAT4.iter().take_while(|&&prob| prob != 0) {
+            rate += bit_cost((residue & mask) != 0, prob);
+            mask >>= 1;
+        }
+    } else if value < 67 {
+        rate += bit_cost(true, probs[8]);
+        rate += bit_cost(false, probs[10]);
+        let residue = value - 35;
+        let mut mask = 1 << 4;
+        for &prob in CAT5.iter().take_while(|&&prob| prob != 0) {
+            rate += bit_cost((residue & mask) != 0, prob);
+            mask >>= 1;
+        }
+    } else {
+        rate += bit_cost(true, probs[8]);
+        rate += bit_cost(true, probs[10]);
+        let residue = value - 67;
+        let mut mask = 1 << 10;
+        for &prob in CAT6.iter().take_while(|&&prob| prob != 0) {
+            rate += bit_cost((residue & mask) != 0, prob);
+            mask >>= 1;
+        }
+    }
+    rate
+}
+
+fn coefficients_rate(
+    probabilities: &CoeffProbTables,
+    coeff_type: usize,
+    ctx: usize,
+    first: usize,
+    levels: &[i16; 16],
+) -> u32 {
+    let last = last_non_zero(levels, first);
+    let mut scan = first;
+    let mut probs = coeff_probs(probabilities, coeff_type, scan, ctx);
+    let mut rate = bit_cost(last >= scan as isize, probs[0]);
+    if last < scan as isize {
+        return rate;
+    }
+
+    while scan < 16 {
+        let coeff = levels[ZIGZAG[scan]];
+        rate += bit_cost(coeff != 0, probs[1]);
+        scan += 1;
+        if coeff == 0 {
+            if scan == 16 {
+                return rate;
+            }
+            probs = coeff_probs(probabilities, coeff_type, scan, 0);
+            continue;
+        }
+
+        let value = coeff.unsigned_abs() as u32;
+        let gt1 = value > 1;
+        rate += bit_cost(gt1, probs[2]);
+        let next_ctx = if gt1 {
+            rate += large_value_rate(value, probs);
+            2
+        } else {
+            1
+        };
+        rate += bit_cost(coeff < 0, 128);
+
+        if scan == 16 {
+            return rate;
+        }
+        probs = coeff_probs(probabilities, coeff_type, scan, next_ctx);
+        rate += bit_cost(last >= scan as isize, probs[0]);
+        if last < scan as isize {
+            return rate;
+        }
+    }
+    rate
 }
 
 fn encode_coefficients(
@@ -1485,6 +2403,8 @@ fn encode_partition0(
     mb_width: usize,
     mb_height: usize,
     base_quant: u8,
+    segment: &SegmentConfig,
+    filter: &FilterConfig,
     probabilities: &CoeffProbTables,
     modes: &[MacroblockMode],
 ) -> Vec<u8> {
@@ -1492,11 +2412,29 @@ fn encode_partition0(
     writer.put_bit_uniform(false);
     writer.put_bit_uniform(false);
 
-    writer.put_bit_uniform(false);
+    writer.put_bit_uniform(segment.use_segment);
+    if segment.use_segment {
+        writer.put_bit_uniform(segment.update_map);
+        writer.put_bit_uniform(true);
+        writer.put_bit_uniform(true);
+        for &quant in &segment.quantizer {
+            writer.put_signed_bits(quant as i32, 7);
+        }
+        for &strength in &segment.filter_strength {
+            writer.put_signed_bits(strength as i32, 6);
+        }
+        if segment.update_map {
+            for &prob in &segment.probs {
+                if writer.put_bit_uniform(prob != 255) {
+                    writer.put_bits(prob as u32, 8);
+                }
+            }
+        }
+    }
 
-    writer.put_bit_uniform(false);
-    writer.put_bits(0, 6);
-    writer.put_bits(0, 3);
+    writer.put_bit_uniform(filter.simple);
+    writer.put_bits(filter.level as u32, 6);
+    writer.put_bits(filter.sharpness as u32, 3);
     writer.put_bit_uniform(false);
 
     writer.put_bits(0, 2);
@@ -1532,6 +2470,13 @@ fn encode_partition0(
     for (index, mode) in modes.iter().enumerate() {
         if index % mb_width == 0 {
             left_modes = [B_DC_PRED; 4];
+        }
+        if segment.update_map {
+            if writer.put_bit(mode.segment >= 2, segment.probs[0]) {
+                writer.put_bit(mode.segment == 3, segment.probs[2]);
+            } else {
+                writer.put_bit(mode.segment == 1, segment.probs[1]);
+            }
         }
         if let Some(prob) = skip_probability {
             writer.put_bit(mode.skip, prob);
@@ -1618,6 +2563,7 @@ fn encode_macroblock(
     let uv_y = mb_y * 8;
     let is_i4x4 = mode.luma == B_PRED;
     let mut stats = stats;
+    let rd = build_rd_multipliers(quant);
 
     if !is_i4x4 {
         predict_block::<16>(
@@ -1664,6 +2610,8 @@ fn encode_macroblock(
                     block_y,
                     mode.sub_luma[block],
                 );
+                let prediction_block =
+                    copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
                 let coeffs = forward_transform(
                     &source.y,
                     source.y_stride,
@@ -1672,7 +2620,23 @@ fn encode_macroblock(
                     block_x,
                     block_y,
                 );
-                let (levels, coeffs) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
+                let ctx = ((left.nz >> sub_y) & 1) as usize + ((top.nz >> sub_x) & 1) as usize;
+                let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
+                let coeffs = refine_levels_greedy(
+                    &source.y,
+                    source.y_stride,
+                    block_x,
+                    block_y,
+                    &prediction_block,
+                    probabilities,
+                    3,
+                    ctx,
+                    0,
+                    quant.y1[0],
+                    quant.y1[1],
+                    rd.i4,
+                    &mut levels,
+                );
                 y_levels[block] = levels;
                 y_coeffs[block] = coeffs;
                 add_transform(
@@ -1686,7 +2650,10 @@ fn encode_macroblock(
         }
     } else {
         let mut y_dc = [0i16; 16];
+        let mut refine_tnz = top.nz & 0x0f;
+        let mut refine_lnz = left.nz & 0x0f;
         for sub_y in 0..4 {
+            let mut l = refine_lnz & 1;
             for sub_x in 0..4 {
                 let block = sub_y * 4 + sub_x;
                 let coeffs = forward_transform(
@@ -1700,14 +2667,56 @@ fn encode_macroblock(
                 y_dc[block] = coeffs[0];
                 let mut ac_only = coeffs;
                 ac_only[0] = 0;
-                let (levels, coeffs) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
+                let prediction_block = copy_block4(
+                    &reconstructed.y,
+                    reconstructed.y_stride,
+                    y_x + sub_x * 4,
+                    y_y + sub_y * 4,
+                );
+                let (mut levels, _) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
+                let ctx = (l + (refine_tnz & 1)) as usize;
+                let coeffs = refine_levels_greedy(
+                    &source.y,
+                    source.y_stride,
+                    y_x + sub_x * 4,
+                    y_y + sub_y * 4,
+                    &prediction_block,
+                    probabilities,
+                    0,
+                    ctx,
+                    1,
+                    quant.y1[0],
+                    quant.y1[1],
+                    rd.i16,
+                    &mut levels,
+                );
                 y_levels[block] = levels;
                 y_coeffs[block] = coeffs;
+                let has_ac = block_has_non_zero(&y_levels[block], 1) as u8;
+                l = has_ac;
+                refine_tnz = (refine_tnz >> 1) | (has_ac << 7);
             }
+            refine_tnz >>= 4;
+            refine_lnz = (refine_lnz >> 1) | (l << 7);
         }
 
         let y2_input = forward_wht(&y_dc);
-        let (levels, y2_coeffs) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
+        let prediction_block = copy_block16(&reconstructed.y, reconstructed.y_stride, y_x, y_y);
+        let (mut levels, _) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
+        let y2_coeffs = refine_y2_levels_greedy(
+            &source.y,
+            source.y_stride,
+            y_x,
+            y_y,
+            &prediction_block,
+            &y_coeffs,
+            probabilities,
+            (top.nz_dc + left.nz_dc) as usize,
+            quant.y2[0],
+            quant.y2[1],
+            rd.i16,
+            &mut levels,
+        );
         y2_levels = levels;
         let y2_dc = inverse_wht(&y2_coeffs);
         for block in 0..16 {
@@ -1728,7 +2737,28 @@ fn encode_macroblock(
                 uv_x + sub_x * 4,
                 uv_y + sub_y * 4,
             );
-            let (levels, coeffs) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
+            let prediction_block = copy_block4(
+                &reconstructed.u,
+                reconstructed.uv_stride,
+                uv_x + sub_x * 4,
+                uv_y + sub_y * 4,
+            );
+            let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
+            let coeffs = refine_levels_greedy(
+                &source.u,
+                source.uv_stride,
+                uv_x + sub_x * 4,
+                uv_y + sub_y * 4,
+                &prediction_block,
+                probabilities,
+                2,
+                0,
+                0,
+                quant.uv[0],
+                quant.uv[1],
+                rd.uv,
+                &mut levels,
+            );
             u_levels[block] = levels;
             u_coeffs[block] = coeffs;
         }
@@ -1747,7 +2777,28 @@ fn encode_macroblock(
                 uv_x + sub_x * 4,
                 uv_y + sub_y * 4,
             );
-            let (levels, coeffs) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
+            let prediction_block = copy_block4(
+                &reconstructed.v,
+                reconstructed.uv_stride,
+                uv_x + sub_x * 4,
+                uv_y + sub_y * 4,
+            );
+            let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
+            let coeffs = refine_levels_greedy(
+                &source.v,
+                source.uv_stride,
+                uv_x + sub_x * 4,
+                uv_y + sub_y * 4,
+                &prediction_block,
+                probabilities,
+                2,
+                0,
+                0,
+                quant.uv[0],
+                quant.uv[1],
+                rd.uv,
+                &mut levels,
+            );
             v_levels[block] = levels;
             v_coeffs[block] = coeffs;
         }
@@ -1920,7 +2971,8 @@ fn encode_token_partition(
     source: &Planes,
     mb_width: usize,
     mb_height: usize,
-    quant: &QuantMatrices,
+    segment: &SegmentConfig,
+    segment_quants: &[QuantMatrices; NUM_MB_SEGMENTS],
     probabilities: &CoeffProbTables,
     stats: Option<&mut CoeffStats>,
 ) -> (Vec<u8>, Planes, Vec<MacroblockMode>) {
@@ -1930,11 +2982,17 @@ fn encode_token_partition(
     let mut top_modes = vec![B_DC_PRED; mb_width * 4];
     let mut modes = Vec::with_capacity(mb_width * mb_height);
     let mut stats = stats;
+    let segment_rd: [RdMultipliers; NUM_MB_SEGMENTS] =
+        std::array::from_fn(|index| build_rd_multipliers(&segment_quants[index]));
 
     for mb_y in 0..mb_height {
         let mut left_context = NonZeroContext::default();
         let mut left_modes = [B_DC_PRED; 4];
         for mb_x in 0..mb_width {
+            let index = mb_y * mb_width + mb_x;
+            let segment_id = segment.segments[index] as usize;
+            let quant = &segment_quants[segment_id];
+            let rd = &segment_rd[segment_id];
             let top = &mut top_modes[mb_x * 4..mb_x * 4 + 4];
             let mut mode = choose_macroblock_mode(
                 source,
@@ -1942,9 +3000,14 @@ fn encode_token_partition(
                 mb_x,
                 mb_y,
                 quant,
+                &rd,
+                probabilities,
+                &top_contexts[mb_x],
+                &left_context,
                 top,
                 &left_modes,
             );
+            mode.segment = segment_id as u8;
             update_mode_cache(&mode, top, &mut left_modes);
             mode.skip = encode_macroblock(
                 &mut writer,
@@ -2000,6 +3063,106 @@ fn build_vp8_frame(
     Ok(data)
 }
 
+fn build_candidate_vp8_frame(
+    width: usize,
+    height: usize,
+    mb_width: usize,
+    mb_height: usize,
+    candidate: &EncodedLossyCandidate,
+    filter: &FilterConfig,
+) -> Result<Vec<u8>, EncoderError> {
+    let segment = segment_with_uniform_filter(&candidate.segment, filter.level);
+    let partition0 = encode_partition0(
+        mb_width,
+        mb_height,
+        candidate.base_quant,
+        &segment,
+        filter,
+        &candidate.probabilities,
+        &candidate.modes,
+    );
+    build_vp8_frame(width, height, &partition0, &candidate.token_partition)
+}
+
+fn encode_lossy_candidate(
+    source: &Planes,
+    mb_width: usize,
+    mb_height: usize,
+    segment: &SegmentConfig,
+) -> Result<EncodedLossyCandidate, EncoderError> {
+    let segment_quants = build_segment_quantizers(segment);
+    let mut stats = [[[[0u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
+    let (initial_partition, _, initial_modes) = encode_token_partition(
+        source,
+        mb_width,
+        mb_height,
+        segment,
+        &segment_quants,
+        &COEFFS_PROBA0,
+        Some(&mut stats),
+    );
+    let probabilities = finalize_token_probabilities(&stats);
+    let (token_partition, modes) = if probabilities == COEFFS_PROBA0 {
+        (initial_partition, initial_modes)
+    } else {
+        let (token_partition, _, modes) = encode_token_partition(
+            source,
+            mb_width,
+            mb_height,
+            segment,
+            &segment_quants,
+            &probabilities,
+            None,
+        );
+        (token_partition, modes)
+    };
+    Ok(EncodedLossyCandidate {
+        base_quant: segment.quantizer[0],
+        segment: segment.clone(),
+        probabilities,
+        modes,
+        token_partition,
+    })
+}
+
+fn finalize_lossy_candidate(
+    width: usize,
+    height: usize,
+    source: &Planes,
+    mb_width: usize,
+    mb_height: usize,
+    base_quant: i32,
+    optimization_level: u8,
+    candidate: &EncodedLossyCandidate,
+) -> Result<Vec<u8>, EncoderError> {
+    let mb_count = mb_width * mb_height;
+    if !use_exhaustive_filter_search(optimization_level, mb_count) {
+        let filter = heuristic_filter(base_quant);
+        return build_candidate_vp8_frame(width, height, mb_width, mb_height, candidate, &filter);
+    }
+
+    let filters = filter_candidates(base_quant);
+    let mut best = None;
+    for filter in &filters {
+        let vp8 = build_candidate_vp8_frame(width, height, mb_width, mb_height, candidate, filter)?;
+        let distortion = yuv_sse(source, width, height, &vp8)?;
+        let replace = match &best {
+            Some((best_distortion, best_len, _)) => {
+                distortion < *best_distortion
+                    || (distortion == *best_distortion && vp8.len() < *best_len)
+            }
+            None => true,
+        };
+        if replace {
+            best = Some((distortion, vp8.len(), vp8));
+        }
+    }
+
+    best.map(|(_, _, vp8)| vp8).ok_or(EncoderError::Bitstream(
+        "lossy filter search produced no output",
+    ))
+}
+
 /// Encodes RGBA pixels to a raw lossy `VP8` frame payload with explicit options.
 pub fn encode_lossy_rgba_to_vp8_with_options(
     width: usize,
@@ -2013,33 +3176,39 @@ pub fn encode_lossy_rgba_to_vp8_with_options(
     let mb_width = (width + 15) >> 4;
     let mb_height = (height + 15) >> 4;
     let base_quant = base_quantizer_from_quality(options.quality);
-    let quant = build_quant_matrices(base_quant);
     let source = rgba_to_yuv420(width, height, rgba, mb_width, mb_height);
-    let mut stats = [[[[0u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
-    let (initial_partition, _, initial_modes) = encode_token_partition(
+    let candidates = build_segment_candidates(
         &source,
         mb_width,
         mb_height,
-        &quant,
-        &COEFFS_PROBA0,
-        Some(&mut stats),
+        base_quant,
+        options.optimization_level,
     );
-    let probabilities = finalize_token_probabilities(&stats);
-    let (token_partition, modes) = if probabilities == COEFFS_PROBA0 {
-        (initial_partition, initial_modes)
-    } else {
-        let (token_partition, _, modes) =
-            encode_token_partition(&source, mb_width, mb_height, &quant, &probabilities, None);
-        (token_partition, modes)
-    };
-    let partition0 = encode_partition0(
-        mb_width,
-        mb_height,
-        base_quant as u8,
-        &probabilities,
-        &modes,
-    );
-    build_vp8_frame(width, height, &partition0, &token_partition)
+    let mut best = None;
+    for segment in &candidates {
+        let candidate = encode_lossy_candidate(&source, mb_width, mb_height, segment)?;
+        let vp8 = finalize_lossy_candidate(
+            width,
+            height,
+            &source,
+            mb_width,
+            mb_height,
+            base_quant,
+            options.optimization_level,
+            &candidate,
+        )?;
+        let replace = match &best {
+            Some((best_bytes, _)) => vp8.len() < *best_bytes,
+            None => true,
+        };
+        if replace {
+            best = Some((vp8.len(), vp8));
+        }
+    }
+
+    best.map(|(_, vp8)| vp8).ok_or(EncoderError::Bitstream(
+        "lossy candidate search produced no output",
+    ))
 }
 
 /// Encodes RGBA pixels to a raw lossy `VP8` frame payload.
@@ -2147,19 +3316,33 @@ mod tests {
         let mb_height = (height + 15) >> 4;
         let options = LossyEncodingOptions::default();
         let base_quant = base_quantizer_from_quality(options.quality);
-        let quant = build_quant_matrices(base_quant);
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
-        let (token_partition, reconstructed, modes) =
-            encode_token_partition(&source, mb_width, mb_height, &quant, &COEFFS_PROBA0, None);
+        let segment = disabled_segment_config(mb_width * mb_height, clipped_quantizer(base_quant));
+        let candidate = encode_lossy_candidate(&source, mb_width, mb_height, &segment).unwrap();
         let partition0 = encode_partition0(
             mb_width,
             mb_height,
             base_quant as u8,
-            &COEFFS_PROBA0,
-            &modes,
+            &segment,
+            &FilterConfig {
+                simple: false,
+                level: 0,
+                sharpness: 0,
+            },
+            &candidate.probabilities,
+            &candidate.modes,
         );
-        let vp8 = build_vp8_frame(width, height, &partition0, &token_partition).unwrap();
+        let vp8 = build_vp8_frame(width, height, &partition0, &candidate.token_partition).unwrap();
         let decoded = decode_lossy_vp8_to_yuv(&vp8).unwrap();
+        let (_, reconstructed, _) = encode_token_partition(
+            &source,
+            mb_width,
+            mb_height,
+            &segment,
+            &build_segment_quantizers(&segment),
+            &candidate.probabilities,
+            None,
+        );
         assert_eq!(decoded.y, reconstructed.y);
         assert_eq!(decoded.u, reconstructed.u);
         assert_eq!(decoded.v, reconstructed.v);
@@ -2192,18 +3375,105 @@ mod tests {
         }
 
         let quant = build_quant_matrices(base_quantizer_from_quality(90));
+        let rd = build_rd_multipliers(&quant);
         let top_modes = [B_DC_PRED; 4];
         let left_modes = [B_DC_PRED; 4];
+        let top_context = NonZeroContext::default();
+        let left_context = NonZeroContext::default();
         let mode = choose_macroblock_mode(
             &source,
             &mut reconstructed,
             0,
             1,
             &quant,
+            &rd,
+            &COEFFS_PROBA0,
+            &top_context,
+            &left_context,
             &top_modes,
             &left_modes,
         );
-        assert_eq!(mode.luma, V_PRED);
+        assert!(matches!(mode.luma, V_PRED | B_PRED));
         assert_eq!(mode.chroma, V_PRED);
+    }
+
+    #[test]
+    fn segment_candidates_include_segmented_plan_for_mixed_activity() {
+        let width = 64;
+        let height = 32;
+        let mb_width = (width + 15) >> 4;
+        let mb_height = (height + 15) >> 4;
+        let mut rgba = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y * width + x) * 4;
+                let (r, g, b) = if x < width / 2 {
+                    (0x80, 0x80, 0x80)
+                } else {
+                    (
+                        ((x * 17 + y * 3) & 0xff) as u8,
+                        ((x * 5 + y * 11) & 0xff) as u8,
+                        ((x * 13 + y * 7) & 0xff) as u8,
+                    )
+                };
+                rgba[offset] = r;
+                rgba[offset + 1] = g;
+                rgba[offset + 2] = b;
+                rgba[offset + 3] = 0xff;
+            }
+        }
+
+        let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
+        let candidates = build_segment_candidates(
+            &source,
+            mb_width,
+            mb_height,
+            13,
+            DEFAULT_LOSSY_OPTIMIZATION_LEVEL,
+        );
+
+        assert!(candidates.iter().any(|candidate| candidate.use_segment));
+        assert!(candidates
+            .iter()
+            .filter(|candidate| candidate.use_segment)
+            .any(|candidate| candidate.segments.iter().any(|&segment| segment != 0)));
+    }
+
+    #[test]
+    fn segment_candidates_can_use_more_than_two_segments() {
+        let width = 96;
+        let height = 64;
+        let mb_width = (width + 15) >> 4;
+        let mb_height = (height + 15) >> 4;
+        let mut rgba = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y * width + x) * 4;
+                let band = x / 24;
+                let value = match band {
+                    0 => 96,
+                    1 => ((x * 3 + y * 5) & 0xff) as u8,
+                    2 => ((x * 9 + y * 13) & 0xff) as u8,
+                    _ => ((x * 17 + y * 29) & 0xff) as u8,
+                };
+                rgba[offset] = value;
+                rgba[offset + 1] = value.wrapping_add((band * 17) as u8);
+                rgba[offset + 2] = value.wrapping_add((band * 33) as u8);
+                rgba[offset + 3] = 0xff;
+            }
+        }
+
+        let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
+        let candidates = build_segment_candidates(
+            &source,
+            mb_width,
+            mb_height,
+            13,
+            MAX_LOSSY_OPTIMIZATION_LEVEL,
+        );
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.use_segment && candidate.segments.iter().copied().max().unwrap_or(0) >= 2
+        }));
     }
 }

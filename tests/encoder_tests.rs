@@ -166,7 +166,10 @@ fn encode_lossy_rgba_to_vp8_round_trips_as_lossy_frame() {
 #[test]
 fn encode_lossy_rgba_to_webp_sets_lossy_features() {
     let (width, height, rgba) = lossy_sample_rgba();
-    let options = LossyEncodingOptions { quality: 90 };
+    let options = LossyEncodingOptions {
+        quality: 90,
+        ..LossyEncodingOptions::default()
+    };
     let webp = encode_lossy_rgba_to_webp_with_options(width, height, &rgba, &options).unwrap();
     let decoded = decode(&webp).unwrap();
     let features = get_features(&webp).unwrap();
@@ -232,13 +235,35 @@ fn encode_lossy_rgba_to_webp_rejects_invalid_quality() {
         1,
         1,
         &[0, 0, 0, 0xff],
-        &LossyEncodingOptions { quality: 101 },
+        &LossyEncodingOptions {
+            quality: 101,
+            ..LossyEncodingOptions::default()
+        },
     )
     .unwrap_err();
 
     assert_eq!(
         error,
         webp_rust::EncoderError::InvalidParam("lossy quality must be in 0..=100")
+    );
+}
+
+#[test]
+fn encode_lossy_rgba_to_webp_rejects_invalid_optimization_level() {
+    let error = encode_lossy_rgba_to_webp_with_options(
+        1,
+        1,
+        &[0, 0, 0, 0xff],
+        &LossyEncodingOptions {
+            optimization_level: 10,
+            ..LossyEncodingOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        webp_rust::EncoderError::InvalidParam("lossy optimization level must be in 0..=9")
     );
 }
 

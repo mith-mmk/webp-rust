@@ -52,7 +52,10 @@ println!("{}", animation.frames.len());
 Advanced encoder tuning stays in the `encoder` module:
 
 ```rust
-let lossy_options = webp_rust::LossyEncodingOptions { quality: 90 };
+let lossy_options = webp_rust::LossyEncodingOptions {
+    quality: 90,
+    optimization_level: 4,
+};
 let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif(
     &image,
     &lossy_options,
@@ -107,6 +110,12 @@ Lossy:
 
 ```bash
 cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
+```
+
+Heavier lossy search:
+
+```bash
+cargo run --example bmp2webp -- --lossy --quality 90 -z 9 input.bmp output.webp
 ```
 
 ## Tests

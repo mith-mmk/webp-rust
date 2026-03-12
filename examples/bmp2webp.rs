@@ -149,7 +149,7 @@ fn default_output_path(input: &Path) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run --example bmp2webp -- [--lossy --quality 0..100] [--opt-level 0|1|2] <input.bmp> [output.webp]"
+    "usage: cargo run --example bmp2webp -- [--lossy --quality 0..100 [-z 0..9]] [--opt-level 0|1|2] <input.bmp> [output.webp]"
 }
 
 fn parse_optimization_level(value: &str) -> Result<u8, Error> {
@@ -158,6 +158,16 @@ fn parse_optimization_level(value: &str) -> Result<u8, Error> {
         .map_err(|_| invalid_input_owned(format!("invalid optimization level: {value}")))?;
     if level > 2 {
         return Err(invalid_input("optimization level must be in 0..=2"));
+    }
+    Ok(level)
+}
+
+fn parse_lossy_optimization_level(value: &str) -> Result<u8, Error> {
+    let level = value
+        .parse::<u8>()
+        .map_err(|_| invalid_input_owned(format!("invalid lossy optimization level: {value}")))?;
+    if level > 9 {
+        return Err(invalid_input("lossy optimization level must be in 0..=9"));
     }
     Ok(level)
 }
@@ -190,6 +200,11 @@ fn main() -> Result<(), Error> {
             "--quality" | "-q" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
                 lossy_options.quality = parse_quality(&value.to_string_lossy())?;
+            }
+            "-z" | "--lossy-opt-level" => {
+                let value = args.next().ok_or_else(|| invalid_input(usage()))?;
+                lossy_options.optimization_level =
+                    parse_lossy_optimization_level(&value.to_string_lossy())?;
             }
             _ => {
                 if input.is_none() {
