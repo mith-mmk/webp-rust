@@ -5,6 +5,7 @@ use crate::decoder::vp8i::{
     B_VL_PRED, B_VR_PRED, DC_PRED, H_PRED, NUM_BANDS, NUM_BMODES, NUM_CTX, NUM_PROBAS, NUM_TYPES,
     TM_PRED, V_PRED,
 };
+use crate::encoder::container::{wrap_still_webp, StillImageChunk};
 use crate::encoder::vp8_bool_writer::Vp8BoolWriter;
 use crate::encoder::EncoderError;
 use crate::ImageBuffer;
@@ -1999,29 +2000,6 @@ fn build_vp8_frame(
     Ok(data)
 }
 
-fn wrap_lossy_webp(vp8: &[u8]) -> Result<Vec<u8>, EncoderError> {
-    let padded_vp8_size = vp8.len() + (vp8.len() & 1);
-    let riff_size = 4usize
-        .checked_add(8)
-        .and_then(|size| size.checked_add(padded_vp8_size))
-        .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-    let total_size = 8usize
-        .checked_add(riff_size)
-        .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-
-    let mut data = Vec::with_capacity(total_size);
-    data.extend_from_slice(b"RIFF");
-    data.extend_from_slice(&(riff_size as u32).to_le_bytes());
-    data.extend_from_slice(b"WEBP");
-    data.extend_from_slice(b"VP8 ");
-    data.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
-    data.extend_from_slice(vp8);
-    if vp8.len() & 1 == 1 {
-        data.push(0);
-    }
-    Ok(data)
-}
-
 /// Encodes RGBA pixels to a raw lossy `VP8` frame payload with explicit options.
 pub fn encode_lossy_rgba_to_vp8_with_options(
     width: usize,
@@ -2080,8 +2058,28 @@ pub fn encode_lossy_rgba_to_webp_with_options(
     rgba: &[u8],
     options: &LossyEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
+    encode_lossy_rgba_to_webp_with_options_and_exif(width, height, rgba, options, None)
+}
+
+/// Encodes RGBA pixels to a still lossy WebP container with explicit options and EXIF.
+pub fn encode_lossy_rgba_to_webp_with_options_and_exif(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LossyEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
     let vp8 = encode_lossy_rgba_to_vp8_with_options(width, height, rgba, options)?;
-    wrap_lossy_webp(&vp8)
+    wrap_still_webp(
+        StillImageChunk {
+            fourcc: *b"VP8 ",
+            payload: &vp8,
+            width,
+            height,
+            has_alpha: false,
+        },
+        exif,
+    )
 }
 
 /// Encodes RGBA pixels to a still lossy WebP container.
@@ -2098,7 +2096,22 @@ pub fn encode_lossy_image_to_webp_with_options(
     image: &ImageBuffer,
     options: &LossyEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_rgba_to_webp_with_options(image.width, image.height, &image.rgba, options)
+    encode_lossy_image_to_webp_with_options_and_exif(image, options, None)
+}
+
+/// Encodes an [`ImageBuffer`] to a still lossy WebP container with explicit options and EXIF.
+pub fn encode_lossy_image_to_webp_with_options_and_exif(
+    image: &ImageBuffer,
+    options: &LossyEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossy_rgba_to_webp_with_options_and_exif(
+        image.width,
+        image.height,
+        &image.rgba,
+        options,
+        exif,
+    )
 }
 
 /// Encodes an [`ImageBuffer`] to a still lossy WebP container.

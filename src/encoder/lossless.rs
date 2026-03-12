@@ -1,4 +1,5 @@
 use crate::encoder::bit_writer::BitWriter;
+use crate::encoder::container::{wrap_still_webp, StillImageChunk};
 use crate::encoder::huffman::{compress_huffman_tree, HuffmanCode};
 use crate::encoder::EncoderError;
 use crate::ImageBuffer;
@@ -968,29 +969,6 @@ fn write_huffman_tree(bw: &mut BitWriter, code: &HuffmanCode) -> Result<(), Enco
     Ok(())
 }
 
-fn wrap_lossless_webp(vp8l: &[u8]) -> Result<Vec<u8>, EncoderError> {
-    let padded_vp8l_size = vp8l.len() + (vp8l.len() & 1);
-    let riff_size = 4usize
-        .checked_add(8)
-        .and_then(|size| size.checked_add(padded_vp8l_size))
-        .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-    let total_size = 8usize
-        .checked_add(riff_size)
-        .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-
-    let mut data = Vec::with_capacity(total_size);
-    data.extend_from_slice(b"RIFF");
-    data.extend_from_slice(&(riff_size as u32).to_le_bytes());
-    data.extend_from_slice(b"WEBP");
-    data.extend_from_slice(b"VP8L");
-    data.extend_from_slice(&(vp8l.len() as u32).to_le_bytes());
-    data.extend_from_slice(vp8l);
-    if vp8l.len() & 1 == 1 {
-        data.push(0);
-    }
-    Ok(data)
-}
-
 fn build_histograms(
     tokens: &[Token],
     width: usize,
@@ -1178,8 +1156,28 @@ pub fn encode_lossless_rgba_to_webp_with_options(
     rgba: &[u8],
     options: &LosslessEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_rgba_to_webp_with_options_and_exif(width, height, rgba, options, None)
+}
+
+/// Encodes RGBA pixels to a still lossless WebP container with explicit options and EXIF.
+pub fn encode_lossless_rgba_to_webp_with_options_and_exif(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LosslessEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
     let vp8l = encode_lossless_rgba_to_vp8l_with_options(width, height, rgba, options)?;
-    wrap_lossless_webp(&vp8l)
+    wrap_still_webp(
+        StillImageChunk {
+            fourcc: *b"VP8L",
+            payload: &vp8l,
+            width,
+            height,
+            has_alpha: has_alpha(rgba),
+        },
+        exif,
+    )
 }
 
 /// Encodes RGBA pixels to a still lossless WebP container.
@@ -1201,7 +1199,22 @@ pub fn encode_lossless_image_to_webp_with_options(
     image: &ImageBuffer,
     options: &LosslessEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_rgba_to_webp_with_options(image.width, image.height, &image.rgba, options)
+    encode_lossless_image_to_webp_with_options_and_exif(image, options, None)
+}
+
+/// Encodes an [`ImageBuffer`] to a still lossless WebP container with explicit options and EXIF.
+pub fn encode_lossless_image_to_webp_with_options_and_exif(
+    image: &ImageBuffer,
+    options: &LosslessEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_rgba_to_webp_with_options_and_exif(
+        image.width,
+        image.height,
+        &image.rgba,
+        options,
+        exif,
+    )
 }
 
 /// Encodes an [`ImageBuffer`] to a still lossless WebP container.

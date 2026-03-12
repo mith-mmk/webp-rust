@@ -2,11 +2,14 @@ use webp_rust::decoder::{
     decode_lossless_vp8l_to_rgba, decode_lossy_vp8_to_rgba, get_features, parse_macroblock_headers,
     WebpFormat,
 };
-use webp_rust::{
+use webp_rust::encoder::{
     encode_lossless_image_to_webp, encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_webp,
     encode_lossless_rgba_to_webp_with_options, encode_lossy_image_to_webp,
-    encode_lossy_rgba_to_vp8, encode_lossy_rgba_to_webp_with_options, image_from_bytes,
-    ImageBuffer, LosslessEncodingOptions, LossyEncodingOptions,
+    encode_lossy_rgba_to_vp8, encode_lossy_rgba_to_webp_with_options,
+};
+use webp_rust::{
+    decode, encode, encode_lossless, encode_lossy, ImageBuffer, LosslessEncodingOptions,
+    LossyEncodingOptions,
 };
 
 fn sample_rgba() -> (usize, usize, Vec<u8>) {
@@ -60,7 +63,7 @@ fn encode_lossless_rgba_to_webp_round_trips_pixels() {
     let (width, height, rgba) = sample_rgba();
 
     let webp = encode_lossless_rgba_to_webp(width, height, &rgba).unwrap();
-    let decoded = image_from_bytes(&webp).unwrap();
+    let decoded = decode(&webp).unwrap();
 
     assert_eq!(decoded.width, width);
     assert_eq!(decoded.height, height);
@@ -75,7 +78,7 @@ fn encode_lossless_rgba_to_webp_round_trips_pixels_at_optimization_level_zero() 
     };
 
     let webp = encode_lossless_rgba_to_webp_with_options(width, height, &rgba, &options).unwrap();
-    let decoded = image_from_bytes(&webp).unwrap();
+    let decoded = decode(&webp).unwrap();
 
     assert_eq!(decoded.width, width);
     assert_eq!(decoded.height, height);
@@ -138,7 +141,7 @@ fn encode_lossless_rgba_to_webp_compresses_flat_runs() {
     }
 
     let webp = encode_lossless_rgba_to_webp(width, height, &rgba).unwrap();
-    let decoded = image_from_bytes(&webp).unwrap();
+    let decoded = decode(&webp).unwrap();
 
     assert_eq!(decoded.rgba, rgba);
     assert!(
@@ -165,7 +168,7 @@ fn encode_lossy_rgba_to_webp_sets_lossy_features() {
     let (width, height, rgba) = lossy_sample_rgba();
     let options = LossyEncodingOptions { quality: 90 };
     let webp = encode_lossy_rgba_to_webp_with_options(width, height, &rgba, &options).unwrap();
-    let decoded = image_from_bytes(&webp).unwrap();
+    let decoded = decode(&webp).unwrap();
     let features = get_features(&webp).unwrap();
     let diff = average_abs_diff(&decoded.rgba, &rgba);
 
@@ -237,4 +240,53 @@ fn encode_lossy_rgba_to_webp_rejects_invalid_quality() {
         error,
         webp_rust::EncoderError::InvalidParam("lossy quality must be in 0..=100")
     );
+}
+
+#[test]
+fn top_level_encode_defaults_to_lossless_and_round_trips() {
+    let (width, height, rgba) = sample_rgba();
+    let image = ImageBuffer {
+        width,
+        height,
+        rgba: rgba.clone(),
+    };
+
+    let webp = encode(&image, None).unwrap();
+    let decoded = decode(&webp).unwrap();
+    let features = get_features(&webp).unwrap();
+
+    assert_eq!(decoded.rgba, rgba);
+    assert_eq!(features.format, WebpFormat::Lossless);
+}
+
+#[test]
+fn top_level_encode_variants_embed_exif_chunk() {
+    let (width, height, rgba) = sample_rgba();
+    let image = ImageBuffer {
+        width,
+        height,
+        rgba,
+    };
+    let exif = b"Exif\0\0unit-test";
+
+    let lossless = encode_lossless(&image, Some(exif)).unwrap();
+    let lossy = encode_lossy(
+        &ImageBuffer {
+            width: image.width,
+            height: image.height,
+            rgba: image
+                .rgba
+                .iter()
+                .enumerate()
+                .map(|(i, v)| if i % 4 == 3 { 0xff } else { *v })
+                .collect(),
+        },
+        Some(exif),
+    )
+    .unwrap();
+
+    assert!(lossless.windows(4).any(|chunk| chunk == b"EXIF"));
+    assert!(lossless.windows(exif.len()).any(|chunk| chunk == exif));
+    assert!(lossy.windows(4).any(|chunk| chunk == b"EXIF"));
+    assert!(lossy.windows(exif.len()).any(|chunk| chunk == exif));
 }

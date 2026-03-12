@@ -1,6 +1,6 @@
 use bin_rs::reader::BytesReader;
 use webp_rust::decoder::header::parse_still_webp;
-use webp_rust::{read_header, read_u24};
+use webp_rust::legacy::{read_header, read_u24};
 
 fn le24(value: usize) -> [u8; 3] {
     [
@@ -55,14 +55,15 @@ fn read_header_rejects_non_riff_data() {
 fn read_header_parses_lossy_sample() {
     let data = include_bytes!("../_testdata/sample.webp");
     let mut reader = BytesReader::from(data.to_vec());
+    let parsed = parse_still_webp(data).unwrap();
 
     let header = read_header(&mut reader).unwrap();
 
     assert!(header.lossy);
-    assert_eq!(header.width, 1920);
-    assert_eq!(header.height, 1080);
-    assert_eq!(header.image_chunksize, 15_226);
-    assert_eq!(header.image.len(), 15_226);
+    assert_eq!(header.width, parsed.features.width);
+    assert_eq!(header.height, parsed.features.height);
+    assert_eq!(header.image_chunksize, parsed.image_chunk.size);
+    assert_eq!(header.image.len(), parsed.image_data.len());
     assert_eq!(header.canvas_width, 0);
     assert_eq!(header.canvas_height, 0);
     assert!(!header.has_alpha);
@@ -118,6 +119,7 @@ fn read_header_keeps_animation_frame_alpha_payload() {
 #[test]
 fn image_from_file_decodes_still_webp() {
     let sample = include_bytes!("../_testdata/sample.webp");
+    let decoded = webp_rust::decode(sample).unwrap();
     let path = std::env::temp_dir().join(format!("webp-rust-{}-sample.webp", std::process::id()));
     std::fs::write(&path, sample).unwrap();
 
@@ -125,7 +127,7 @@ fn image_from_file_decodes_still_webp() {
 
     let _ = std::fs::remove_file(&path);
 
-    assert_eq!(image.width, 1920);
-    assert_eq!(image.height, 1080);
-    assert_eq!(&image.rgba[..4], &[177, 147, 189, 255]);
+    assert_eq!(image.width, decoded.width);
+    assert_eq!(image.height, decoded.height);
+    assert_eq!(image.rgba, decoded.rgba);
 }

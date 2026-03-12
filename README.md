@@ -13,21 +13,35 @@ Pure Rust WebP decoder and partial encoder.
 
 ## Library API
 
-Still images:
+Top-level still-image decode:
 
 ```rust
-let image = webp_rust::image_from_bytes(&data)?;
+let image = webp_rust::decode(&data)?;
 println!("{}x{}", image.width, image.height);
+```
+
+Top-level still-image encode:
+
+```rust
+let webp = webp_rust::encode(&image, None)?;
+let lossy = webp_rust::encode_lossy(&image, None)?;
+let lossless = webp_rust::encode_lossless(&image, None)?;
+```
+
+To embed raw EXIF metadata, pass the chunk payload directly:
+
+```rust
+let webp = webp_rust::encode_lossless(&image, Some(exif_bytes))?;
 ```
 
 Native file input:
 
 ```rust
 #[cfg(not(target_family = "wasm"))]
-let image = webp_rust::image_from_file("input.webp".to_string())?;
+let image = webp_rust::decode_file("input.webp")?;
 ```
 
-Animated WebP is not accepted by `image_from_bytes` / `image_from_file`.
+Animated WebP is not accepted by `decode` / `decode_file`.
 For animation, use the decoder module directly:
 
 ```rust
@@ -35,41 +49,23 @@ let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
 ```
 
-Lossless encoding:
+Advanced encoder tuning stays in the `encoder` module:
 
 ```rust
-let webp = webp_rust::encode_lossless_rgba_to_webp(width, height, &rgba)?;
-```
-
-Lossy encoding:
-
-```rust
-let webp = webp_rust::encode_lossy_rgba_to_webp(width, height, &rgba)?;
-```
-
-With explicit lossy quality:
-
-```rust
-let options = webp_rust::LossyEncodingOptions { quality: 90 };
-let webp = webp_rust::encode_lossy_rgba_to_webp_with_options(
-    width,
-    height,
-    &rgba,
-    &options,
+let lossy_options = webp_rust::LossyEncodingOptions { quality: 90 };
+let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif(
+    &image,
+    &lossy_options,
+    Some(exif_bytes),
 )?;
-```
 
-With explicit compression effort:
-
-```rust
-let options = webp_rust::LosslessEncodingOptions {
+let lossless_options = webp_rust::LosslessEncodingOptions {
     optimization_level: 2,
 };
-let webp = webp_rust::encode_lossless_rgba_to_webp_with_options(
-    width,
-    height,
-    &rgba,
-    &options,
+let lossless = webp_rust::encoder::encode_lossless_image_to_webp_with_options_and_exif(
+    &image,
+    &lossless_options,
+    Some(exif_bytes),
 )?;
 ```
 

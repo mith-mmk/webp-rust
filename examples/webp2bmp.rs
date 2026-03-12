@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use webp_rust::decode;
 use webp_rust::decoder::{decode_animation_webp, get_features};
-use webp_rust::image_from_bytes;
 
 type Error = Box<dyn std::error::Error>;
 type DecoderError = webp_rust::decoder::DecoderError;
@@ -160,7 +160,7 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
 
-    let image = image_from_bytes(&data)?;
+    let image = decode(&data)?;
     let bmp = encode_bmp24_from_rgba(image.width, image.height, &image.rgba)?;
 
     if let Some(parent) = output.parent() {

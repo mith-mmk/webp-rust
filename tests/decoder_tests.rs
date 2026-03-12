@@ -129,8 +129,8 @@ fn get_features_parses_lossy_sample() {
 
     let features = get_features(data).unwrap();
 
-    assert_eq!(features.width, 1920);
-    assert_eq!(features.height, 1080);
+    assert_eq!(features.width, 1152);
+    assert_eq!(features.height, 896);
     assert_eq!(features.format, WebpFormat::Lossy);
     assert!(!features.has_alpha);
     assert!(!features.has_animation);
@@ -143,8 +143,8 @@ fn parse_still_webp_exposes_vp8_payload() {
 
     let parsed = parse_still_webp(data).unwrap();
 
-    assert_eq!(parsed.image_chunk.size, 15_226);
-    assert_eq!(parsed.image_data.len(), 15_226);
+    assert_eq!(parsed.image_chunk.size, 66_702);
+    assert_eq!(parsed.image_data.len(), 66_702);
     assert!(parsed.alpha_chunk.is_none());
     assert!(parsed.alpha_data.is_none());
 }
@@ -158,10 +158,10 @@ fn parse_lossy_headers_reads_sample_partition_headers() {
 
     assert!(vp8.frame.key_frame);
     assert!(vp8.frame.show);
-    assert_eq!(vp8.picture.width, 1920);
-    assert_eq!(vp8.picture.height, 1080);
-    assert_eq!(vp8.macroblock_width, 120);
-    assert_eq!(vp8.macroblock_height, 68);
+    assert_eq!(vp8.picture.width, 1152);
+    assert_eq!(vp8.picture.height, 896);
+    assert_eq!(vp8.macroblock_width, 72);
+    assert_eq!(vp8.macroblock_height, 56);
     assert!(!vp8.token_partition_sizes.is_empty());
     assert!(vp8.token_partition_sizes.len() <= 8);
     assert!(vp8.quantization.indices.base_q0 > 0);
@@ -174,9 +174,9 @@ fn parse_macroblock_headers_reads_all_lossy_macroblocks() {
 
     let frame = parse_macroblock_headers(parsed.image_data).unwrap();
 
-    assert_eq!(frame.frame.macroblock_width, 120);
-    assert_eq!(frame.frame.macroblock_height, 68);
-    assert_eq!(frame.macroblocks.len(), 120 * 68);
+    assert_eq!(frame.frame.macroblock_width, 72);
+    assert_eq!(frame.frame.macroblock_height, 56);
+    assert_eq!(frame.macroblocks.len(), 72 * 56);
     assert!(frame.macroblocks.iter().any(|mb| mb.is_i4x4));
     assert!(frame.macroblocks.iter().all(|mb| mb.uv_mode <= 3));
 }
@@ -188,7 +188,7 @@ fn parse_macroblock_data_reads_residual_coefficients() {
 
     let frame = parse_macroblock_data(parsed.image_data).unwrap();
 
-    assert_eq!(frame.macroblocks.len(), 120 * 68);
+    assert_eq!(frame.macroblocks.len(), 72 * 56);
     assert!(frame
         .macroblocks
         .iter()
@@ -201,41 +201,41 @@ fn decode_lossy_webp_to_rgba_matches_reference_pixels() {
 
     let image = decode_lossy_webp_to_rgba(data).unwrap();
 
-    assert_eq!(image.width, 1920);
-    assert_eq!(image.height, 1080);
+    assert_eq!(image.width, 1152);
+    assert_eq!(image.height, 896);
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 0, 0),
-        [177, 147, 189, 255],
+        [24, 65, 105, 255],
         0,
     );
     assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 960, 540),
-        [254, 169, 161, 255],
+        rgba_at(&image.rgba, image.width, 576, 448),
+        [189, 150, 154, 255],
         0,
     );
     assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 0, 1079),
-        [253, 190, 2, 255],
+        rgba_at(&image.rgba, image.width, 0, 895),
+        [58, 59, 63, 255],
         0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 123, 456),
-        [243, 179, 167, 255],
+        [27, 36, 49, 255],
         0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 789, 321),
-        [222, 167, 181, 255],
+        [253, 191, 182, 255],
         0,
     );
     assert_rgba_close(
         rgba_at(&image.rgba, image.width, 1000, 100),
-        [183, 151, 196, 255],
+        [65, 55, 56, 255],
         0,
     );
     assert_rgba_close(
-        rgba_at(&image.rgba, image.width, 42, 900),
-        [254, 193, 4, 255],
+        rgba_at(&image.rgba, image.width, 42, 800),
+        [34, 37, 45, 255],
         0,
     );
 }
@@ -349,7 +349,11 @@ fn decode_lossy_webp_to_rgba_applies_raw_alpha_chunk() {
 
     assert_eq!(image.width, base.width);
     assert_eq!(image.height, base.height);
-    for &(x, y) in &[(0usize, 0usize), (123, 456), (1919, 1079)] {
+    for &(x, y) in &[
+        (0usize, 0usize),
+        (123, 456),
+        (base.width - 1, base.height - 1),
+    ] {
         let expected_alpha = alpha[y * image.width + x];
         let actual = rgba_at(&image.rgba, image.width, x, y);
         let expected = rgba_at(&base.rgba, base.width, x, y);
@@ -443,7 +447,11 @@ fn decode_animation_webp_handles_lossy_alpha_frames() {
     let animation = decode_animation_webp(&webp).unwrap();
 
     assert_eq!(animation.frames.len(), 1);
-    for &(x, y) in &[(0usize, 0usize), (640, 360), (1919, 1079)] {
+    for &(x, y) in &[
+        (0usize, 0usize),
+        (base.width / 2, base.height / 2),
+        (base.width - 1, base.height - 1),
+    ] {
         let expected_alpha = alpha[y * animation.width + x];
         let actual = rgba_at(&animation.frames[0].rgba, animation.width, x, y);
         let expected = rgba_at(&base.rgba, base.width, x, y);

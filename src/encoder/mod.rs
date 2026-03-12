@@ -7,6 +7,7 @@
 //! intra-only `VP8` bitstream.
 
 mod bit_writer;
+mod container;
 mod error;
 mod huffman;
 mod lossless;
@@ -16,12 +17,15 @@ mod vp8_bool_writer;
 pub use error::EncoderError;
 pub use lossless::{
     encode_lossless_image_to_webp, encode_lossless_image_to_webp_with_options,
-    encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_vp8l_with_options,
-    encode_lossless_rgba_to_webp, encode_lossless_rgba_to_webp_with_options,
+    encode_lossless_image_to_webp_with_options_and_exif, encode_lossless_rgba_to_vp8l,
+    encode_lossless_rgba_to_vp8l_with_options, encode_lossless_rgba_to_webp,
+    encode_lossless_rgba_to_webp_with_options, encode_lossless_rgba_to_webp_with_options_and_exif,
     LosslessEncodingOptions,
 };
 pub use lossy::{
-    encode_lossy_image_to_webp, encode_lossy_image_to_webp_with_options, encode_lossy_rgba_to_vp8,
+    encode_lossy_image_to_webp, encode_lossy_image_to_webp_with_options,
+    encode_lossy_image_to_webp_with_options_and_exif, encode_lossy_rgba_to_vp8,
     encode_lossy_rgba_to_vp8_with_options, encode_lossy_rgba_to_webp,
-    encode_lossy_rgba_to_webp_with_options, LossyEncodingOptions,
+    encode_lossy_rgba_to_webp_with_options, encode_lossy_rgba_to_webp_with_options_and_exif,
+    LossyEncodingOptions,
 };

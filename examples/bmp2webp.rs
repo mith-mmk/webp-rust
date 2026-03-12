@@ -2,10 +2,10 @@ use std::fs;
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use webp_rust::{
+use webp_rust::encoder::{
     encode_lossless_image_to_webp_with_options, encode_lossy_image_to_webp_with_options,
-    ImageBuffer, LosslessEncodingOptions, LossyEncodingOptions,
 };
+use webp_rust::{ImageBuffer, LosslessEncodingOptions, LossyEncodingOptions};
 
 type Error = Box<dyn std::error::Error>;
 
