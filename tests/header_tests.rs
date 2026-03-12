@@ -35,7 +35,7 @@ fn wrap_riff(chunks: &[Vec<u8>]) -> Vec<u8> {
 
 #[test]
 fn read_u24_reads_little_endian_values() {
-    let mut reader = BytesReader::from_vec(vec![0x56, 0x34, 0x12]);
+    let mut reader = BytesReader::from(vec![0x56, 0x34, 0x12]);
 
     let value = read_u24(&mut reader).unwrap();
 
@@ -44,7 +44,7 @@ fn read_u24_reads_little_endian_values() {
 
 #[test]
 fn read_header_rejects_non_riff_data() {
-    let mut reader = BytesReader::from_vec(b"NOPE".to_vec());
+    let mut reader = BytesReader::from(b"NOPE".to_vec());
 
     let result = read_header(&mut reader);
 
@@ -54,7 +54,7 @@ fn read_header_rejects_non_riff_data() {
 #[test]
 fn read_header_parses_lossy_sample() {
     let data = include_bytes!("../_testdata/sample.webp");
-    let mut reader = BytesReader::from_vec(data.to_vec());
+    let mut reader = BytesReader::from(data.to_vec());
 
     let header = read_header(&mut reader).unwrap();
 
@@ -101,7 +101,7 @@ fn read_header_keeps_animation_frame_alpha_payload() {
         make_chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]),
         make_chunk(b"ANMF", &anmf_payload),
     ]);
-    let mut reader = BytesReader::from_vec(webp);
+    let mut reader = BytesReader::from(webp);
 
     let header = read_header(&mut reader).unwrap();
     let frame = &header.animation_frame.unwrap()[0];

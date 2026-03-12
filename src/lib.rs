@@ -1,7 +1,7 @@
-//! webp-rust is a pure Rust WebP decoder with a small lossless encoder.
+//! webp-rust is a pure Rust WebP decoder with small lossy and lossless encoders.
 //! This library is based on the official WebP codec in C. It supports lossy
-//! and lossless WebP decode, animated WebP decode, and still-image lossless
-//! `VP8L` encode from RGBA input.
+//! and lossless WebP decode, animated WebP decode, and still-image lossy
+//! `VP8` and lossless `VP8L` encode from RGBA input.
 //!
 //! The crate exposes a small top-level API for decoding still images to RGBA
 //! and a lower-level [`decoder`] module for container parsing and animation
@@ -16,8 +16,13 @@ pub mod decoder;
 pub mod encoder;
 
 pub use encoder::{
-    encode_lossless_image_to_webp, encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_webp,
-    EncoderError,
+    encode_lossless_image_to_webp, encode_lossless_image_to_webp_with_options,
+    encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_vp8l_with_options,
+    encode_lossless_rgba_to_webp, encode_lossless_rgba_to_webp_with_options,
+    encode_lossy_image_to_webp, encode_lossy_image_to_webp_with_options, encode_lossy_rgba_to_vp8,
+    encode_lossy_rgba_to_vp8_with_options, encode_lossy_rgba_to_webp,
+    encode_lossy_rgba_to_webp_with_options, EncoderError, LosslessEncodingOptions,
+    LossyEncodingOptions,
 };
 
 const MB_FEATURE_TREE_PROBS: usize = 3;
@@ -243,7 +248,7 @@ impl WebpHeader {
 /// Reads a 24-bit little-endian integer from a [`BinaryReader`].
 pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     let mut b = [0_u8; 3];
-    reader.read_bytes(&mut b)?;
+    reader.read_exact(&mut b)?;
     let val = (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16);
     Ok(val)
 }
@@ -285,7 +290,7 @@ pub fn image_from_file(filename: String) -> Result<ImageBuffer, Error> {
 }
 
 fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
-    let mut reader = BytesReader::from_vec(data.to_vec());
+    let mut reader = BytesReader::from(data.to_vec());
     let mut frame = None;
     let mut alpha = None;
 

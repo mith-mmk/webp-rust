@@ -5,7 +5,7 @@ Pure Rust WebP decoder and partial encoder.
 ## Status
 
 - Still image decode: `VP8` lossy, `VP8L` lossless
-- Still image encode: lossless `VP8L` from RGBA
+- Still image encode: lossy `VP8` and lossless `VP8L` from RGBA
 - Alpha: `ALPH` for lossy still images and lossy animation frames
 - Animation: compositing to RGBA frame sequence
 - Library output: RGBA only
@@ -41,10 +41,43 @@ Lossless encoding:
 let webp = webp_rust::encode_lossless_rgba_to_webp(width, height, &rgba)?;
 ```
 
-Current encoder scope is still-image lossless only. Lossy encode and animated
-encode are not implemented.
+Lossy encoding:
 
-## Example
+```rust
+let webp = webp_rust::encode_lossy_rgba_to_webp(width, height, &rgba)?;
+```
+
+With explicit lossy quality:
+
+```rust
+let options = webp_rust::LossyEncodingOptions { quality: 90 };
+let webp = webp_rust::encode_lossy_rgba_to_webp_with_options(
+    width,
+    height,
+    &rgba,
+    &options,
+)?;
+```
+
+With explicit compression effort:
+
+```rust
+let options = webp_rust::LosslessEncodingOptions {
+    optimization_level: 2,
+};
+let webp = webp_rust::encode_lossless_rgba_to_webp_with_options(
+    width,
+    height,
+    &rgba,
+    &options,
+)?;
+```
+
+Current encoder scope is still-image only. The lossy path currently targets
+opaque RGBA input and emits a minimal intra-only `VP8` bitstream. Animated
+encode is not implemented.
+
+## Examples
 
 `webp2bmp` converts still WebP to a BMP file and animated WebP to a BMP sequence.
 
@@ -65,6 +98,20 @@ This writes:
 - `target/sample_animation_0000.bmp`
 - `target/sample_animation_0001.bmp`
 - `...`
+
+`bmp2webp` converts an uncompressed 24bpp or 32bpp BMP file to a still WebP.
+
+Lossless:
+
+```bash
+cargo run --example bmp2webp -- --opt-level 2 input.bmp output.webp
+```
+
+Lossy:
+
+```bash
+cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
+```
 
 ## Tests
 

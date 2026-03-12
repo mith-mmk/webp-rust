@@ -186,7 +186,7 @@ const BMODES_PROBA: [[[u8; NUM_BMODES - 1]; NUM_BMODES]; NUM_BMODES] = [
     ],
 ];
 
-const COEFFS_PROBA0: [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES] = [
+pub(crate) const COEFFS_PROBA0: [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES] = [
     [
         [
             [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128],
@@ -453,7 +453,7 @@ pub fn parse_intra_mode_row(
     Ok(row)
 }
 
-const COEFFS_UPDATE_PROBA: [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES] = [
+pub(crate) const COEFFS_UPDATE_PROBA: [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES] = [
     [
         [
             [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255],
