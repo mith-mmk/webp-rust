@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::encoder::bit_writer::BitWriter;
 use crate::encoder::container::{wrap_still_webp, StillImageChunk};
@@ -113,6 +114,7 @@ struct TokenBuildOptions {
 #[derive(Debug, Clone, Copy)]
 enum TracebackStep {
     Literal,
+    Cache { key: usize },
     Copy { distance: usize, length: usize },
 }
 
@@ -123,6 +125,7 @@ struct TracebackCostModel {
     blue: Vec<usize>,
     alpha: Vec<usize>,
     distance: Vec<usize>,
+    length_cost_intervals: Vec<(usize, usize, usize)>,
 }
 
 type HistogramSet = [Vec<u32>; 5];
@@ -1871,9 +1874,27 @@ fn build_tokens_greedy(
 fn build_traceback_cost_model(
     width: usize,
     tokens: &[Token],
+    color_cache_bits: usize,
 ) -> Result<TracebackCostModel, EncoderError> {
-    let histograms = build_histograms(tokens, width, 0)?;
+    let histograms = build_histograms(tokens, width, color_cache_bits)?;
     let group = build_group_codes(&histograms)?;
+    let mut length_cost_intervals = Vec::new();
+    let mut start = 1usize;
+    let mut current_cost = {
+        let prefix = prefix_encode(1)?;
+        group.green.code_lengths()[NUM_LITERAL_CODES + prefix.symbol] as usize + prefix.extra_bits
+    };
+    for length in 2..=MAX_LENGTH {
+        let prefix = prefix_encode(length)?;
+        let cost = group.green.code_lengths()[NUM_LITERAL_CODES + prefix.symbol] as usize
+            + prefix.extra_bits;
+        if cost != current_cost {
+            length_cost_intervals.push((start, length, current_cost));
+            start = length;
+            current_cost = cost;
+        }
+    }
+    length_cost_intervals.push((start, MAX_LENGTH + 1, current_cost));
     Ok(TracebackCostModel {
         literal: group
             .green
@@ -1905,6 +1926,7 @@ fn build_traceback_cost_model(
             .iter()
             .map(|&bits| bits as usize)
             .collect(),
+        length_cost_intervals,
     })
 }
 
@@ -1916,19 +1938,14 @@ impl TracebackCostModel {
             + self.blue[(argb & 0xff) as usize]
     }
 
-    fn copy_cost(
-        &self,
-        width: usize,
-        distance: usize,
-        length: usize,
-    ) -> Result<usize, EncoderError> {
-        let length_prefix = prefix_encode(length)?;
+    fn distance_cost(&self, width: usize, distance: usize) -> Result<usize, EncoderError> {
         let plane_code = distance_to_plane_code(width, distance);
         let dist_prefix = prefix_encode(plane_code)?;
-        Ok(self.literal[NUM_LITERAL_CODES + length_prefix.symbol]
-            + length_prefix.extra_bits
-            + self.distance[dist_prefix.symbol]
-            + dist_prefix.extra_bits)
+        Ok(self.distance[dist_prefix.symbol] + dist_prefix.extra_bits)
+    }
+
+    fn cache_cost(&self, key: usize) -> usize {
+        self.literal[NUM_LITERAL_CODES + NUM_LENGTH_CODES + key]
     }
 }
 
@@ -2013,6 +2030,23 @@ fn collect_match_candidates(
     candidates
 }
 
+fn build_cache_keys(
+    argb: &[u32],
+    color_cache_bits: usize,
+) -> Result<Vec<Option<usize>>, EncoderError> {
+    if color_cache_bits == 0 {
+        return Ok(vec![None; argb.len()]);
+    }
+
+    let mut cache = ColorCache::new(color_cache_bits)?;
+    let mut keys = Vec::with_capacity(argb.len());
+    for &pixel in argb {
+        keys.push(cache.lookup(pixel));
+        cache.insert(pixel);
+    }
+    Ok(keys)
+}
+
 fn build_tokens_with_traceback(
     width: usize,
     argb: &[u32],
@@ -2024,18 +2058,61 @@ fn build_tokens_with_traceback(
     let mut steps = vec![None; argb.len() + 1];
     let mut heads = vec![usize::MAX; MATCH_HASH_SIZE];
     let mut prev = vec![usize::MAX; argb.len()];
+    let cache_keys = build_cache_keys(argb, options.color_cache_bits)?;
     let window_offsets = if options.use_window_offsets {
         build_window_offsets(width, options.window_offset_limit)
     } else {
         Vec::new()
     };
+    let mut pending: BinaryHeap<Reverse<(usize, usize, usize, usize, usize)>> = BinaryHeap::new();
+    let mut active: BinaryHeap<Reverse<(usize, usize, usize, usize)>> = BinaryHeap::new();
 
     best_costs[0] = 0;
-    for index in 0..argb.len() {
+    for index in 0..=argb.len() {
+        while let Some(Reverse((start, end_exclusive, cost, source, distance))) =
+            pending.peek().copied()
+        {
+            if start > index {
+                break;
+            }
+            pending.pop();
+            if end_exclusive > index {
+                active.push(Reverse((cost, end_exclusive, source, distance)));
+            }
+        }
+        while let Some(Reverse((_, end_exclusive, _, _))) = active.peek().copied() {
+            if end_exclusive > index {
+                break;
+            }
+            active.pop();
+        }
+        if let Some(Reverse((cost, _, source, distance))) = active.peek().copied() {
+            if cost < best_costs[index] {
+                best_costs[index] = cost;
+                previous[index] = source;
+                steps[index] = Some(TracebackStep::Copy {
+                    distance,
+                    length: index - source,
+                });
+            }
+        }
+        if index == argb.len() {
+            break;
+        }
+
         let base_cost = best_costs[index];
         if base_cost == usize::MAX {
             update_match_chain(argb, index, &mut heads, &mut prev);
             continue;
+        }
+
+        if let Some(key) = cache_keys[index] {
+            let cache_cost = base_cost.saturating_add(cost_model.cache_cost(key));
+            if cache_cost < best_costs[index + 1] {
+                best_costs[index + 1] = cache_cost;
+                previous[index + 1] = index;
+                steps[index + 1] = Some(TracebackStep::Cache { key });
+            }
         }
 
         let literal_cost = base_cost.saturating_add(cost_model.literal_cost(argb[index]));
@@ -2048,13 +2125,26 @@ fn build_tokens_with_traceback(
         for (distance, length) in
             collect_match_candidates(width, argb, index, options, &heads, &prev, &window_offsets)
         {
-            let end = index + length;
-            let copy_cost =
-                base_cost.saturating_add(cost_model.copy_cost(width, distance, length)?);
-            if copy_cost < best_costs[end] {
-                best_costs[end] = copy_cost;
-                previous[end] = index;
-                steps[end] = Some(TracebackStep::Copy { distance, length });
+            let min_length = min_match_length_for_distance(width, distance);
+            let distance_cost =
+                base_cost.saturating_add(cost_model.distance_cost(width, distance)?);
+            for &(start_length, end_length_exclusive, length_cost) in
+                &cost_model.length_cost_intervals
+            {
+                if start_length > length {
+                    break;
+                }
+                let start = min_length.max(start_length);
+                let end_exclusive = (length + 1).min(end_length_exclusive);
+                if start < end_exclusive {
+                    pending.push(Reverse((
+                        index + start,
+                        index + end_exclusive,
+                        distance_cost.saturating_add(length_cost),
+                        index,
+                        distance,
+                    )));
+                }
             }
         }
 
@@ -2067,6 +2157,10 @@ fn build_tokens_with_traceback(
         match steps[cursor].ok_or(EncoderError::Bitstream("traceback path is incomplete"))? {
             TracebackStep::Literal => {
                 tokens.push(Token::Literal(argb[cursor - 1]));
+                cursor = previous[cursor];
+            }
+            TracebackStep::Cache { key } => {
+                tokens.push(Token::Cache(key));
                 cursor = previous[cursor];
             }
             TracebackStep::Copy { distance, length } => {
@@ -2098,11 +2192,19 @@ fn build_tokens(
         return Ok(greedy);
     }
 
-    let cost_model = build_traceback_cost_model(width, &greedy)?;
+    let cost_model = build_traceback_cost_model(width, &greedy, options.color_cache_bits)?;
     let traceback = build_tokens_with_traceback(width, argb, options, &cost_model)?;
     let height = argb.len() / width;
-    let greedy_cost = estimate_image_stream_size(width, height, &greedy, 0, false, 0)?;
-    let traceback_cost = estimate_image_stream_size(width, height, &traceback, 0, false, 0)?;
+    let greedy_cost =
+        estimate_image_stream_size(width, height, &greedy, options.color_cache_bits, false, 0)?;
+    let traceback_cost = estimate_image_stream_size(
+        width,
+        height,
+        &traceback,
+        options.color_cache_bits,
+        false,
+        0,
+    )?;
     if traceback_cost <= greedy_cost {
         Ok(traceback)
     } else {
@@ -3048,15 +3150,7 @@ fn write_image_stream(
     entropy_search_level: u8,
     options: TokenBuildOptions,
 ) -> Result<(), EncoderError> {
-    let base_tokens = build_tokens(
-        width,
-        argb,
-        TokenBuildOptions {
-            color_cache_bits: 0,
-            ..options
-        },
-    )?;
-    let tokens = apply_color_cache_to_tokens(argb, &base_tokens, options.color_cache_bits)?;
+    let tokens = build_tokens(width, argb, options)?;
     write_image_stream_from_tokens(
         bw,
         width,
@@ -3178,7 +3272,11 @@ fn select_best_color_cache_bits(
         let size = if cache_bits == 0 {
             estimate_image_stream_size(width, height, base_tokens, 0, false, 0)?
         } else {
-            let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
+            let tokens = build_tokens(
+                width,
+                argb,
+                token_build_options(profile.match_search_level, cache_bits),
+            )?;
             estimate_image_stream_size(width, height, &tokens, cache_bits, false, 0)?
         };
         if size < best_size {
