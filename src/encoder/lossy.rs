@@ -121,7 +121,10 @@ struct EncodedLossyCandidate {
 struct LossySearchProfile {
     fast_mode_search: bool,
     allow_i4x4: bool,
-    refine_coeffs: bool,
+    refine_i16: bool,
+    refine_i4_search: bool,
+    refine_i4_final: bool,
+    refine_chroma: bool,
     refine_y2: bool,
     update_probabilities: bool,
 }
@@ -238,35 +241,70 @@ fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
         0 => LossySearchProfile {
             fast_mode_search: true,
             allow_i4x4: false,
-            refine_coeffs: false,
+            refine_i16: false,
+            refine_i4_search: false,
+            refine_i4_final: false,
+            refine_chroma: false,
             refine_y2: false,
             update_probabilities: false,
         },
         1 | 2 => LossySearchProfile {
             fast_mode_search: false,
             allow_i4x4: false,
-            refine_coeffs: false,
+            refine_i16: false,
+            refine_i4_search: false,
+            refine_i4_final: false,
+            refine_chroma: false,
             refine_y2: false,
             update_probabilities: true,
         },
         3 | 4 => LossySearchProfile {
             fast_mode_search: false,
             allow_i4x4: true,
-            refine_coeffs: false,
+            refine_i16: false,
+            refine_i4_search: false,
+            refine_i4_final: false,
+            refine_chroma: false,
             refine_y2: false,
             update_probabilities: true,
         },
-        5 | 6 | 7 => LossySearchProfile {
+        5 => LossySearchProfile {
             fast_mode_search: false,
             allow_i4x4: true,
-            refine_coeffs: true,
+            refine_i16: false,
+            refine_i4_search: false,
+            refine_i4_final: false,
+            refine_chroma: true,
+            refine_y2: false,
+            update_probabilities: true,
+        },
+        6 => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: true,
+            refine_i16: true,
+            refine_i4_search: false,
+            refine_i4_final: true,
+            refine_chroma: true,
+            refine_y2: false,
+            update_probabilities: true,
+        },
+        7 => LossySearchProfile {
+            fast_mode_search: false,
+            allow_i4x4: true,
+            refine_i16: true,
+            refine_i4_search: true,
+            refine_i4_final: true,
+            refine_chroma: true,
             refine_y2: false,
             update_probabilities: true,
         },
         _ => LossySearchProfile {
             fast_mode_search: false,
             allow_i4x4: true,
-            refine_coeffs: true,
+            refine_i16: true,
+            refine_i4_search: true,
+            refine_i4_final: true,
+            refine_chroma: true,
             refine_y2: true,
             update_probabilities: true,
         },
@@ -1381,7 +1419,7 @@ fn refine_y2_levels_greedy(
 }
 
 fn maybe_refine_levels(
-    profile: &LossySearchProfile,
+    enabled: bool,
     source: &[u8],
     source_stride: usize,
     x: usize,
@@ -1396,7 +1434,7 @@ fn maybe_refine_levels(
     lambda: u32,
     levels: &mut [i16; 16],
 ) -> [i16; 16] {
-    if profile.refine_coeffs {
+    if enabled {
         refine_levels_greedy(
             source,
             source_stride,
@@ -1616,7 +1654,7 @@ fn evaluate_luma_mode(
             let prediction_block = copy_block4_from_buffer(&prediction, 16, sub_x * 4, sub_y * 4);
             let ctx = (l + (refine_tnz & 1)) as usize;
             let coeffs = maybe_refine_levels(
-                profile,
+                profile.refine_i16,
                 &source.y,
                 source.y_stride,
                 x + sub_x * 4,
@@ -1772,7 +1810,7 @@ fn evaluate_luma4_mode(
                     copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
                 let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
                 let dequantized = maybe_refine_levels(
-                    profile,
+                    profile.refine_i4_search,
                     &source.y,
                     source.y_stride,
                     block_x,
@@ -1919,7 +1957,7 @@ fn evaluate_chroma_mode(
             let (mut levels_u, _) = quantize_block(&coeffs_u, quant.uv[0], quant.uv[1], 0);
             let ctx = (l + (tnz_u & 1)) as usize;
             let coeffs_u = maybe_refine_levels(
-                profile,
+                profile.refine_chroma,
                 &source.u,
                 source.uv_stride,
                 x + sub_x * 4,
@@ -1964,7 +2002,7 @@ fn evaluate_chroma_mode(
             let (mut levels_v, _) = quantize_block(&coeffs_v, quant.uv[0], quant.uv[1], 0);
             let ctx = (l + (tnz_v & 1)) as usize;
             let coeffs_v = maybe_refine_levels(
-                profile,
+                profile.refine_chroma,
                 &source.v,
                 source.uv_stride,
                 x + sub_x * 4,
@@ -2849,7 +2887,7 @@ fn encode_macroblock(
                 let ctx = ((left.nz >> sub_y) & 1) as usize + ((top.nz >> sub_x) & 1) as usize;
                 let (mut levels, _) = quantize_block(&coeffs, quant.y1[0], quant.y1[1], 0);
                 let coeffs = maybe_refine_levels(
-                    profile,
+                    profile.refine_i4_final,
                     &source.y,
                     source.y_stride,
                     block_x,
@@ -2903,7 +2941,7 @@ fn encode_macroblock(
                 let (mut levels, _) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
                 let ctx = (l + (refine_tnz & 1)) as usize;
                 let coeffs = maybe_refine_levels(
-                    profile,
+                    profile.refine_i16,
                     &source.y,
                     source.y_stride,
                     y_x + sub_x * 4,
@@ -2974,7 +3012,7 @@ fn encode_macroblock(
             );
             let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
             let coeffs = maybe_refine_levels(
-                profile,
+                profile.refine_chroma,
                 &source.u,
                 source.uv_stride,
                 uv_x + sub_x * 4,
@@ -3015,7 +3053,7 @@ fn encode_macroblock(
             );
             let (mut levels, _) = quantize_block(&coeffs, quant.uv[0], quant.uv[1], 0);
             let coeffs = maybe_refine_levels(
-                profile,
+                profile.refine_chroma,
                 &source.v,
                 source.uv_stride,
                 uv_x + sub_x * 4,
