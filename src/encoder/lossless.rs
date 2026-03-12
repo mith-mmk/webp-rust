@@ -31,6 +31,10 @@ const MATCH_HASH_SIZE: usize = 1 << MATCH_HASH_BITS;
 const MATCH_CHAIN_DEPTH_LEVEL1: usize = 8;
 const MATCH_CHAIN_DEPTH_LEVEL2: usize = 32;
 const MAX_FALLBACK_DISTANCE: usize = (1 << 20) - 120;
+const APPROX_LITERAL_COST_BITS: isize = 32;
+const APPROX_CACHE_COST_BITS: isize = 8;
+const APPROX_COPY_LENGTH_SYMBOL_BITS: isize = 8;
+const APPROX_COPY_DISTANCE_SYMBOL_BITS: isize = 8;
 const CODE_LENGTH_CODE_ORDER: [usize; NUM_CODE_LENGTH_CODES] = [
     17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 ];
@@ -128,9 +132,9 @@ struct HistogramCandidate {
 pub struct LosslessEncodingOptions {
     /// Compression effort from `0` to `2`.
     ///
-    /// - `0`: global transforms only
-    /// - `1`: global transforms + color-cache trial + short backward search
-    /// - `2`: global/tiled transform search + color-cache trial + deeper backward search
+    /// - `0`: fast path with raw/subtract-green trials and no meta-huffman
+    /// - `1`: global transform search + capped color-cache search + light meta-huffman
+    /// - `2`: shortlisted global/tiled transform search + full color-cache/meta-huffman search
     pub optimization_level: u8,
 }
 
@@ -736,6 +740,64 @@ fn build_global_cross_plan(width: usize, height: usize, subtract_green: &[u32]) 
     }
 }
 
+fn build_raw_plan(argb: &[u32]) -> TransformPlan {
+    TransformPlan {
+        use_subtract_green: false,
+        cross_bits: None,
+        cross_width: 0,
+        cross_image: Vec::new(),
+        predictor_bits: None,
+        predictor_width: 0,
+        predictor_image: Vec::new(),
+        predicted: argb.to_vec(),
+    }
+}
+
+fn build_subtract_green_plan(subtract_green: &[u32]) -> TransformPlan {
+    TransformPlan {
+        use_subtract_green: true,
+        cross_bits: None,
+        cross_width: 0,
+        cross_image: Vec::new(),
+        predictor_bits: None,
+        predictor_width: 0,
+        predictor_image: Vec::new(),
+        predicted: subtract_green.to_vec(),
+    }
+}
+
+fn build_global_predictor_plan(
+    width: usize,
+    height: usize,
+    subtract_green: &[u32],
+) -> TransformPlan {
+    let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
+        make_uniform_predictor_transform_image(
+            width,
+            height,
+            GLOBAL_PREDICTOR_TRANSFORM_BITS,
+            GLOBAL_PREDICTOR_MODE,
+        );
+    let predicted = apply_predictor_transform(
+        width,
+        height,
+        subtract_green,
+        GLOBAL_PREDICTOR_TRANSFORM_BITS,
+        &predictor_modes,
+    );
+
+    TransformPlan {
+        use_subtract_green: true,
+        cross_bits: None,
+        cross_width: 0,
+        cross_image: Vec::new(),
+        predictor_bits: Some(GLOBAL_PREDICTOR_TRANSFORM_BITS),
+        predictor_width,
+        predictor_image,
+        predicted,
+    }
+}
+
 fn build_global_transform_plan(
     width: usize,
     height: usize,
@@ -793,6 +855,33 @@ fn build_tiled_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -
     }
 }
 
+fn build_tiled_predictor_plan(
+    width: usize,
+    height: usize,
+    subtract_green: &[u32],
+) -> TransformPlan {
+    let (predictor_width, _predictor_height, predictor_modes, predictor_image) =
+        make_predictor_transform_image(width, height, subtract_green);
+    let predicted = apply_predictor_transform(
+        width,
+        height,
+        subtract_green,
+        PREDICTOR_TRANSFORM_BITS,
+        &predictor_modes,
+    );
+
+    TransformPlan {
+        use_subtract_green: true,
+        cross_bits: None,
+        cross_width: 0,
+        cross_image: Vec::new(),
+        predictor_bits: Some(PREDICTOR_TRANSFORM_BITS),
+        predictor_width,
+        predictor_image,
+        predicted,
+    }
+}
+
 fn build_tiled_transform_plan(
     width: usize,
     height: usize,
@@ -831,8 +920,14 @@ fn encode_transform_plan_to_vp8l(
     use_color_cache: bool,
 ) -> Result<Vec<u8>, EncoderError> {
     let no_cache_options = token_build_options(optimization_level, 0);
-    let mut best =
-        encode_transform_plan_to_vp8l_with_cache(width, height, rgba, plan, no_cache_options)?;
+    let mut best = encode_transform_plan_to_vp8l_with_cache(
+        width,
+        height,
+        rgba,
+        plan,
+        no_cache_options,
+        optimization_level,
+    )?;
     if use_color_cache && plan.predicted.len() >= 64 {
         let base_tokens = build_tokens(width, &plan.predicted, no_cache_options)?;
         let best_cache_bits = select_best_color_cache_bits(
@@ -840,7 +935,8 @@ fn encode_transform_plan_to_vp8l(
             height,
             &plan.predicted,
             &base_tokens,
-            MAX_CACHE_BITS,
+            max_color_cache_bits_for_level(optimization_level),
+            optimization_level,
         )?;
         let with_cache = encode_transform_plan_to_vp8l_with_cache(
             width,
@@ -848,6 +944,7 @@ fn encode_transform_plan_to_vp8l(
             rgba,
             plan,
             token_build_options(optimization_level, best_cache_bits),
+            optimization_level,
         )?;
         if best_cache_bits > 0 && with_cache.len() < best.len() {
             best = with_cache;
@@ -856,12 +953,40 @@ fn encode_transform_plan_to_vp8l(
     Ok(best)
 }
 
+fn shortlist_transform_plans(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    plans: Vec<TransformPlan>,
+    keep: usize,
+) -> Result<Vec<TransformPlan>, EncoderError> {
+    if plans.len() <= keep {
+        return Ok(plans);
+    }
+
+    let fast_options = token_build_options(0, 0);
+    let mut ranked = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let size =
+            encode_transform_plan_to_vp8l_with_cache(width, height, rgba, &plan, fast_options, 0)?
+                .len();
+        ranked.push((size, plan));
+    }
+    ranked.sort_by_key(|(size, _)| *size);
+    Ok(ranked
+        .into_iter()
+        .take(keep)
+        .map(|(_, plan)| plan)
+        .collect())
+}
+
 fn encode_transform_plan_to_vp8l_with_cache(
     width: usize,
     height: usize,
     rgba: &[u8],
     plan: &TransformPlan,
     token_options: TokenBuildOptions,
+    optimization_level: u8,
 ) -> Result<Vec<u8>, EncoderError> {
     let transform_options = TokenBuildOptions {
         color_cache_bits: 0,
@@ -889,6 +1014,7 @@ fn encode_transform_plan_to_vp8l_with_cache(
             plan.cross_width,
             &plan.cross_image,
             false,
+            0,
             transform_options,
         )?;
     }
@@ -901,11 +1027,19 @@ fn encode_transform_plan_to_vp8l_with_cache(
             plan.predictor_width,
             &plan.predictor_image,
             false,
+            0,
             transform_options,
         )?;
     }
     bw.put_bits(0, 1)?;
-    write_image_stream(&mut bw, width, &plan.predicted, true, token_options)?;
+    write_image_stream(
+        &mut bw,
+        width,
+        &plan.predicted,
+        true,
+        optimization_level,
+        token_options,
+    )?;
 
     let bitstream = bw.into_bytes();
     let mut vp8l = Vec::with_capacity(1 + bitstream.len());
@@ -942,7 +1076,8 @@ fn encode_palette_candidate_to_vp8l(
             height,
             &candidate.packed_indices,
             &base_tokens,
-            MAX_CACHE_BITS,
+            max_color_cache_bits_for_level(optimization_level),
+            optimization_level,
         )?;
         token_options = token_build_options(optimization_level, best_cache_bits);
     }
@@ -970,6 +1105,7 @@ fn encode_palette_candidate_to_vp8l(
         candidate.palette.len(),
         &palette_image,
         false,
+        0,
         transform_options,
     )?;
 
@@ -979,6 +1115,7 @@ fn encode_palette_candidate_to_vp8l(
         candidate.packed_width,
         &candidate.packed_indices,
         true,
+        optimization_level,
         token_options,
     )?;
 
@@ -1011,6 +1148,72 @@ fn token_build_options(optimization_level: u8, color_cache_bits: usize) -> Token
         window_offset_limit,
         lazy_matching,
     }
+}
+
+fn max_color_cache_bits_for_level(optimization_level: u8) -> usize {
+    match optimization_level {
+        0 => 0,
+        1 => 7,
+        _ => MAX_CACHE_BITS,
+    }
+}
+
+fn shortlist_color_cache_candidates_for_level(optimization_level: u8) -> usize {
+    match optimization_level {
+        0 => 1,
+        1 => 1,
+        _ => 2,
+    }
+}
+
+fn meta_huffman_candidates(
+    optimization_level: u8,
+    width: usize,
+    height: usize,
+) -> &'static [(usize, usize)] {
+    match optimization_level {
+        0 => &[],
+        1 => &[(5usize, 4usize)],
+        _ if width * height >= 512 * 512 => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+        ],
+        _ => &[
+            (6usize, 2usize),
+            (5usize, 4usize),
+            (5usize, 6usize),
+            (4usize, 4usize),
+            (4usize, 6usize),
+        ],
+    }
+}
+
+fn suggested_max_color_cache_bits(argb: &[u32], max_cache_bits: usize) -> usize {
+    if max_cache_bits == 0 {
+        return 0;
+    }
+
+    let unique_limit = 1usize << max_cache_bits;
+    let mut unique = HashSet::with_capacity(unique_limit.min(argb.len()));
+    for &pixel in argb {
+        unique.insert(pixel);
+        if unique.len() > unique_limit {
+            return max_cache_bits;
+        }
+    }
+
+    if unique.len() <= 1 {
+        return 0;
+    }
+    let mut bits = 0usize;
+    let mut capacity = 1usize;
+    while capacity < unique.len() && bits < max_cache_bits {
+        bits += 1;
+        capacity <<= 1;
+    }
+    bits.min(max_cache_bits)
 }
 
 fn build_window_offsets(width: usize, max_plane_codes: usize) -> Vec<usize> {
@@ -1058,20 +1261,26 @@ fn min_match_length_for_distance(width: usize, distance: usize) -> usize {
     }
 }
 
-fn match_score(width: usize, distance: usize, length: usize) -> isize {
-    let plane_code = distance_to_plane_code(width, distance);
-    let penalty = if distance == 1 || distance == width {
+fn prefix_extra_bit_count(value: usize) -> usize {
+    if value <= 4 {
         0
-    } else if plane_code <= 32 {
-        1
-    } else if plane_code <= 128 {
-        2
-    } else if plane_code <= 512 {
-        3
     } else {
-        4
-    };
-    length as isize - penalty
+        let value = value - 1;
+        let highest_bit = usize::BITS as usize - 1 - value.leading_zeros() as usize;
+        highest_bit - 1
+    }
+}
+
+fn copy_cost_bits(width: usize, distance: usize, length: usize) -> isize {
+    let plane_code = distance_to_plane_code(width, distance);
+    APPROX_COPY_LENGTH_SYMBOL_BITS
+        + prefix_extra_bit_count(length) as isize
+        + APPROX_COPY_DISTANCE_SYMBOL_BITS
+        + prefix_extra_bit_count(plane_code) as isize
+}
+
+fn match_gain_bits(width: usize, distance: usize, length: usize) -> isize {
+    APPROX_LITERAL_COST_BITS * length as isize - copy_cost_bits(width, distance, length)
 }
 
 fn consider_match(
@@ -1084,10 +1293,10 @@ fn consider_match(
         return;
     }
 
-    let candidate_score = match_score(width, distance, length);
+    let candidate_score = match_gain_bits(width, distance, length);
     if best_match
         .map(|(best_distance, best_length)| {
-            let best_score = match_score(width, best_distance, best_length);
+            let best_score = match_gain_bits(width, best_distance, best_length);
             candidate_score > best_score
                 || (candidate_score == best_score
                     && (length > best_length
@@ -1161,7 +1370,6 @@ fn find_best_hash_match(
     let hash = hash_match_pixels(argb, index);
     let mut candidate = heads[hash];
     let mut best = None;
-    let mut best_length = 0usize;
     let mut remaining = match_chain_depth;
 
     while candidate != usize::MAX && remaining > 0 {
@@ -1172,31 +1380,17 @@ fn find_best_hash_match(
         let distance = index - candidate;
         if distance <= MAX_FALLBACK_DISTANCE {
             let length = find_match_length(argb, index, candidate, max_len);
-            if length >= MIN_LENGTH
-                && (length > best_length
-                    || (length == best_length
-                        && best
-                            .map(|(best_distance, _)| distance < best_distance)
-                            .unwrap_or(true)))
-            {
-                best = Some((distance, length));
-                best_length = length;
-                if length == max_len {
-                    break;
-                }
+            if length >= MIN_LENGTH {
+                consider_match(width, &mut best, distance, length);
+            }
+            if length == max_len {
+                break;
             }
         }
         candidate = prev[candidate];
     }
 
-    if let Some((distance, length)) = best {
-        if distance == 1 || distance == width {
-            return Some((distance, length));
-        }
-        return Some((distance, length));
-    }
-
-    None
+    best
 }
 
 fn find_best_window_offset_match(
@@ -1216,6 +1410,14 @@ fn find_best_window_offset_match(
         consider_match(width, &mut best_match, distance, length);
     }
     best_match
+}
+
+fn single_pixel_cost_bits(cache_hit: bool) -> isize {
+    if cache_hit {
+        APPROX_CACHE_COST_BITS
+    } else {
+        APPROX_LITERAL_COST_BITS
+    }
 }
 
 fn find_best_match(
@@ -1291,7 +1493,7 @@ fn build_tokens(
 
         if options.lazy_matching {
             if let Some((distance, length)) = best_match {
-                if length < 32 && index + 1 < argb.len() {
+                if length < 64 && index + 1 < argb.len() {
                     let preview = preview_update_match_chain(argb, index, &mut heads, &mut prev);
                     let next_match = find_best_match(
                         width,
@@ -1304,8 +1506,19 @@ fn build_tokens(
                     );
                     restore_previewed_match_chain(index, preview, &mut heads, &mut prev);
 
-                    if next_match
-                        .map(|(_, next_length)| next_length + 1 > length)
+                    let current_gain = match_gain_bits(width, distance, length);
+                    let next_choice = next_match.map(|(next_distance, next_length)| {
+                        (
+                            next_length,
+                            match_gain_bits(width, next_distance, next_length)
+                                + APPROX_LITERAL_COST_BITS
+                                - single_pixel_cost_bits(cache_key.is_some()),
+                        )
+                    });
+                    if next_choice
+                        .map(|(next_length, next_gain)| {
+                            index + 1 + next_length >= index + length && next_gain > current_gain
+                        })
                         .unwrap_or(false)
                     {
                         best_match = None;
@@ -1697,12 +1910,12 @@ fn histogram_partition_index(
     index.min(partitions - 1)
 }
 
-fn build_entropy_seed_histograms(
+fn entropy_histogram_candidates(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
-    group_count: usize,
-) -> Vec<HistogramSet> {
-    if group_count == 0 || non_empty_tiles.is_empty() {
+    target_count: usize,
+) -> Vec<HistogramCandidate> {
+    if target_count == 0 || non_empty_tiles.is_empty() {
         return Vec::new();
     }
 
@@ -1772,7 +1985,7 @@ fn build_entropy_seed_histograms(
         return Vec::new();
     }
 
-    while candidates.len() > group_count {
+    while candidates.len() > target_count {
         let mut best_pair = None;
         let mut best_penalty = f64::INFINITY;
         for lhs in 0..candidates.len() {
@@ -1797,6 +2010,16 @@ fn build_entropy_seed_histograms(
         candidates[lhs].weight += rhs_candidate.weight;
     }
 
+    candidates
+}
+
+fn build_entropy_seed_histograms(
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    group_count: usize,
+) -> Vec<HistogramSet> {
+    let mut candidates =
+        entropy_histogram_candidates(non_empty_tiles, tile_histograms, group_count);
     candidates.sort_by(|lhs, rhs| rhs.weight.cmp(&lhs.weight));
     candidates
         .into_iter()
@@ -2001,12 +2224,14 @@ fn build_meta_huffman_plan(
         return Ok(None);
     }
 
-    let mut best_plan = None;
-    let mut best_cost = usize::MAX;
-    for seed_histograms in [
+    let seed_candidates = vec![
         build_weighted_seed_histograms(&non_empty_tiles, &tile_histograms, group_count),
         build_entropy_seed_histograms(&non_empty_tiles, &tile_histograms, group_count),
-    ] {
+    ];
+
+    let mut best_plan = None;
+    let mut best_cost = usize::MAX;
+    for seed_histograms in seed_candidates {
         if let Some(mut plan) = refine_meta_huffman_plan(
             tile_count,
             color_cache_bits,
@@ -2187,6 +2412,7 @@ fn write_meta_huffman_image_stream(
         plan.huffman_xsize,
         &huffman_image,
         false,
+        0,
         TokenBuildOptions {
             color_cache_bits: 0,
             match_chain_depth: 0,
@@ -2207,33 +2433,23 @@ fn write_image_stream_from_tokens(
     width: usize,
     height: usize,
     tokens: &[Token],
-    allow_meta_huffman: bool,
+    emit_meta_huffman_flag: bool,
+    optimization_level: u8,
     color_cache_bits: usize,
 ) -> Result<(), EncoderError> {
     let histograms = build_histograms(tokens, width, color_cache_bits)?;
     let group = build_group_codes(&histograms)?;
 
-    if allow_meta_huffman {
+    let meta_candidates = if emit_meta_huffman_flag {
+        meta_huffman_candidates(optimization_level, width, height)
+    } else {
+        &[]
+    };
+    if !meta_candidates.is_empty() {
         let single_size =
             estimate_single_group_image_stream_size(width, tokens, color_cache_bits, true, &group)?;
         let mut best_meta = None;
         let mut best_meta_size = usize::MAX;
-        let meta_candidates: &[(usize, usize)] = if width * height >= 512 * 512 {
-            &[
-                (6usize, 2usize),
-                (5usize, 4usize),
-                (5usize, 6usize),
-                (4usize, 4usize),
-            ]
-        } else {
-            &[
-                (6usize, 2usize),
-                (5usize, 4usize),
-                (5usize, 6usize),
-                (4usize, 4usize),
-                (4usize, 6usize),
-            ]
-        };
         for &(huffman_bits, group_count) in meta_candidates {
             if let Some(plan) = build_meta_huffman_plan(
                 width,
@@ -2266,7 +2482,7 @@ fn write_image_stream_from_tokens(
         bw,
         width,
         tokens,
-        allow_meta_huffman,
+        emit_meta_huffman_flag,
         color_cache_bits,
         &group,
     )
@@ -2276,7 +2492,8 @@ fn write_image_stream(
     bw: &mut BitWriter,
     width: usize,
     argb: &[u32],
-    allow_meta_huffman: bool,
+    emit_meta_huffman_flag: bool,
+    optimization_level: u8,
     options: TokenBuildOptions,
 ) -> Result<(), EncoderError> {
     let base_tokens = build_tokens(
@@ -2293,7 +2510,8 @@ fn write_image_stream(
         width,
         argb.len() / width,
         &tokens,
-        allow_meta_huffman,
+        emit_meta_huffman_flag,
+        optimization_level,
         options.color_cache_bits,
     )
 }
@@ -2333,7 +2551,8 @@ fn estimate_image_stream_size(
     height: usize,
     tokens: &[Token],
     color_cache_bits: usize,
-    allow_meta_huffman: bool,
+    emit_meta_huffman_flag: bool,
+    optimization_level: u8,
 ) -> Result<usize, EncoderError> {
     let mut bw = BitWriter::default();
     write_image_stream_from_tokens(
@@ -2341,10 +2560,21 @@ fn estimate_image_stream_size(
         width,
         height,
         tokens,
-        allow_meta_huffman,
+        emit_meta_huffman_flag,
+        optimization_level,
         color_cache_bits,
     )?;
     Ok(bw.into_bytes().len())
+}
+
+fn estimate_cache_candidate_cost(
+    width: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+) -> Result<usize, EncoderError> {
+    let histograms = build_histograms(tokens, width, color_cache_bits)?;
+    let group = build_group_codes(&histograms)?;
+    Ok(histogram_cost(&histograms, &group))
 }
 
 fn select_best_color_cache_bits(
@@ -2353,13 +2583,41 @@ fn select_best_color_cache_bits(
     argb: &[u32],
     base_tokens: &[Token],
     max_cache_bits: usize,
+    optimization_level: u8,
 ) -> Result<usize, EncoderError> {
-    let mut best_cache_bits = 0usize;
-    let mut best_size = estimate_image_stream_size(width, height, base_tokens, 0, false)?;
+    let max_cache_bits = suggested_max_color_cache_bits(argb, max_cache_bits);
+    let shortlist_size = shortlist_color_cache_candidates_for_level(optimization_level);
 
+    let mut cheap_candidates = Vec::with_capacity(max_cache_bits + 1);
+    cheap_candidates.push((
+        estimate_cache_candidate_cost(width, base_tokens, 0)?,
+        0usize,
+    ));
     for cache_bits in 1..=max_cache_bits {
         let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
-        let size = estimate_image_stream_size(width, height, &tokens, cache_bits, false)?;
+        let cost = estimate_cache_candidate_cost(width, &tokens, cache_bits)?;
+        cheap_candidates.push((cost, cache_bits));
+    }
+
+    cheap_candidates.sort_by_key(|(cost, bits)| (*cost, *bits));
+    let mut shortlist = cheap_candidates
+        .into_iter()
+        .take(shortlist_size.max(1))
+        .map(|(_, bits)| bits)
+        .collect::<Vec<_>>();
+    if !shortlist.contains(&0) {
+        shortlist.push(0);
+    }
+
+    let mut best_cache_bits = 0usize;
+    let mut best_size = usize::MAX;
+    for cache_bits in shortlist {
+        let size = if cache_bits == 0 {
+            estimate_image_stream_size(width, height, base_tokens, 0, false, 0)?
+        } else {
+            let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
+            estimate_image_stream_size(width, height, &tokens, cache_bits, false, 0)?
+        };
         if size < best_size {
             best_size = size;
             best_cache_bits = cache_bits;
@@ -2382,28 +2640,47 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     let argb = rgba_to_argb(rgba);
     let subtract_green = apply_subtract_green_transform(&argb);
     let use_color_cache = options.optimization_level >= 1;
-    let global_plan = build_global_transform_plan(width, height, &subtract_green);
+    let mut plans = vec![build_raw_plan(&argb)];
+    if subtract_green != argb {
+        plans.push(build_subtract_green_plan(&subtract_green));
+    }
+    if options.optimization_level >= 1 {
+        plans.push(build_global_cross_plan(width, height, &subtract_green));
+        plans.push(build_global_transform_plan(width, height, &subtract_green));
+    }
+    if options.optimization_level >= 2 {
+        plans.push(build_global_predictor_plan(width, height, &subtract_green));
+        plans.push(build_tiled_cross_plan(width, height, &subtract_green));
+        plans.push(build_tiled_predictor_plan(width, height, &subtract_green));
+        plans.push(build_tiled_transform_plan(width, height, &subtract_green));
+    }
+
+    let shortlist_size = match options.optimization_level {
+        0 => plans.len(),
+        1 => plans.len().min(3),
+        _ => plans.len().min(4),
+    };
+    let plans = shortlist_transform_plans(width, height, rgba, plans, shortlist_size)?;
+
     let mut best = encode_transform_plan_to_vp8l(
         width,
         height,
         rgba,
-        &global_plan,
+        &plans[0],
         options.optimization_level,
         use_color_cache,
     )?;
-
-    if options.optimization_level >= 2 {
-        let tiled_plan = build_tiled_transform_plan(width, height, &subtract_green);
-        let tiled = encode_transform_plan_to_vp8l(
+    for plan in plans.iter().skip(1) {
+        let encoded = encode_transform_plan_to_vp8l(
             width,
             height,
             rgba,
-            &tiled_plan,
+            plan,
             options.optimization_level,
             use_color_cache,
         )?;
-        if tiled.len() < best.len() {
-            best = tiled;
+        if encoded.len() < best.len() {
+            best = encoded;
         }
     }
 

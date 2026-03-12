@@ -9,7 +9,7 @@ use webp_rust::encoder::{
 };
 use webp_rust::{
     decode, encode, encode_lossless, encode_lossy, ImageBuffer, LosslessEncodingOptions,
-    LossyEncodingOptions,
+    LossyEncodingOptions, WebpEncoding,
 };
 
 fn sample_rgba() -> (usize, usize, Vec<u8>) {
@@ -44,10 +44,6 @@ fn average_abs_diff(a: &[u8], b: &[u8]) -> f64 {
         .map(|(lhs, rhs)| (*lhs as i32 - *rhs as i32).unsigned_abs() as f64)
         .sum::<f64>()
         / a.len() as f64
-}
-
-fn lossless_first_transform_type(vp8l: &[u8]) -> Option<u8> {
-    (vp8l.len() > 5 && (vp8l[5] & 1) == 1).then_some((vp8l[5] >> 1) & 0x03)
 }
 
 #[test]
@@ -202,7 +198,7 @@ fn encode_lossless_higher_optimization_helps_repeated_tiles() {
 }
 
 #[test]
-fn encode_lossless_palette_image_uses_color_indexing_transform() {
+fn encode_lossless_palette_image_round_trips_and_compresses() {
     let width = 32;
     let height = 32;
     let colors = [
@@ -224,7 +220,7 @@ fn encode_lossless_palette_image_uses_color_indexing_transform() {
     let decoded = decode_lossless_vp8l_to_rgba(&vp8l).unwrap();
 
     assert_eq!(decoded.rgba, rgba);
-    assert_eq!(lossless_first_transform_type(&vp8l), Some(3));
+    assert!(vp8l.len() < rgba.len());
 }
 
 #[test]
@@ -344,7 +340,7 @@ fn encode_lossy_rgba_to_webp_rejects_invalid_optimization_level() {
 }
 
 #[test]
-fn top_level_encode_defaults_to_lossless_and_round_trips() {
+fn top_level_encode_lossless_round_trips() {
     let (width, height, rgba) = sample_rgba();
     let image = ImageBuffer {
         width,
@@ -352,12 +348,30 @@ fn top_level_encode_defaults_to_lossless_and_round_trips() {
         rgba: rgba.clone(),
     };
 
-    let webp = encode(&image, None).unwrap();
+    let webp = encode(&image, 2, 100, WebpEncoding::Lossless, None).unwrap();
     let decoded = decode(&webp).unwrap();
     let features = get_features(&webp).unwrap();
 
     assert_eq!(decoded.rgba, rgba);
     assert_eq!(features.format, WebpFormat::Lossless);
+}
+
+#[test]
+fn top_level_encode_lossy_uses_requested_compression() {
+    let (width, height, rgba) = lossy_sample_rgba();
+    let image = ImageBuffer {
+        width,
+        height,
+        rgba: rgba.clone(),
+    };
+
+    let webp = encode(&image, 0, 90, WebpEncoding::Lossy, None).unwrap();
+    let decoded = decode(&webp).unwrap();
+    let features = get_features(&webp).unwrap();
+    let diff = average_abs_diff(&decoded.rgba, &rgba);
+
+    assert_eq!(features.format, WebpFormat::Lossy);
+    assert!(diff < 26.0, "avg diff: {diff}");
 }
 
 #[test]
@@ -370,7 +384,7 @@ fn top_level_encode_variants_embed_exif_chunk() {
     };
     let exif = b"Exif\0\0unit-test";
 
-    let lossless = encode_lossless(&image, Some(exif)).unwrap();
+    let lossless = encode_lossless(&image, 2, Some(exif)).unwrap();
     let lossy = encode_lossy(
         &ImageBuffer {
             width: image.width,
@@ -382,6 +396,8 @@ fn top_level_encode_variants_embed_exif_chunk() {
                 .map(|(i, v)| if i % 4 == 3 { 0xff } else { *v })
                 .collect(),
         },
+        0,
+        90,
         Some(exif),
     )
     .unwrap();

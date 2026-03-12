@@ -23,15 +23,21 @@ println!("{}x{}", image.width, image.height);
 Top-level still-image encode:
 
 ```rust
-let webp = webp_rust::encode(&image, None)?;
-let lossy = webp_rust::encode_lossy(&image, None)?;
-let lossless = webp_rust::encode_lossless(&image, None)?;
+let webp = webp_rust::encode(
+    &image,
+    2,
+    100,
+    webp_rust::WebpEncoding::Lossless,
+    None,
+)?;
+let lossy = webp_rust::encode_lossy(&image, 0, 90, None)?;
+let lossless = webp_rust::encode_lossless(&image, 2, None)?;
 ```
 
 To embed raw EXIF metadata, pass the chunk payload directly:
 
 ```rust
-let webp = webp_rust::encode_lossless(&image, Some(exif_bytes))?;
+let webp = webp_rust::encode_lossless(&image, 2, Some(exif_bytes))?;
 ```
 
 Native file input:
