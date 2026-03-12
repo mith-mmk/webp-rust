@@ -16,12 +16,16 @@ const CROSS_COLOR_TRANSFORM_BITS: usize = 5;
 const PREDICTOR_TRANSFORM_BITS: usize = 5;
 const MAX_OPTIMIZATION_LEVEL: u8 = 2;
 const NUM_PREDICTOR_MODES: u8 = 14;
-const DEFAULT_COLOR_CACHE_BITS: usize = 10;
 const NUM_LITERAL_CODES: usize = 256;
 const NUM_LENGTH_CODES: usize = 24;
 const NUM_DISTANCE_CODES: usize = 40;
 const NUM_CODE_LENGTH_CODES: usize = 19;
 const COLOR_CACHE_HASH_MUL: u32 = 0x1e35_a7bd;
+const MATCH_HASH_BITS: usize = 15;
+const MATCH_HASH_SIZE: usize = 1 << MATCH_HASH_BITS;
+const MATCH_CHAIN_DEPTH_LEVEL1: usize = 8;
+const MATCH_CHAIN_DEPTH_LEVEL2: usize = 32;
+const MAX_FALLBACK_DISTANCE: usize = (1 << 20) - 120;
 const CODE_LENGTH_CODE_ORDER: [usize; NUM_CODE_LENGTH_CODES] = [
     17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 ];
@@ -72,14 +76,22 @@ struct TransformPlan {
     predicted: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TokenBuildOptions {
+    color_cache_bits: usize,
+    match_chain_depth: usize,
+    use_window_offsets: bool,
+    lazy_matching: bool,
+}
+
 /// Lossless encoder tuning knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LosslessEncodingOptions {
     /// Compression effort from `0` to `2`.
     ///
     /// - `0`: global transforms only
-    /// - `1`: global transforms + color-cache trial
-    /// - `2`: global/tiled transform search + color-cache trial
+    /// - `1`: global transforms + color-cache trial + short backward search
+    /// - `2`: global/tiled transform search + color-cache trial + deeper backward search
     pub optimization_level: u8,
 }
 
@@ -673,18 +685,24 @@ fn encode_transform_plan_to_vp8l(
     height: usize,
     rgba: &[u8],
     plan: &TransformPlan,
+    optimization_level: u8,
     use_color_cache: bool,
 ) -> Result<Vec<u8>, EncoderError> {
-    let mut best = encode_transform_plan_to_vp8l_with_cache(width, height, rgba, plan, 0)?;
+    let no_cache_options = token_build_options(optimization_level, 0);
+    let mut best =
+        encode_transform_plan_to_vp8l_with_cache(width, height, rgba, plan, no_cache_options)?;
     if use_color_cache && plan.predicted.len() >= 64 {
+        let base_tokens = build_tokens(width, &plan.predicted, no_cache_options)?;
+        let best_cache_bits =
+            select_best_color_cache_bits(width, &plan.predicted, &base_tokens, MAX_CACHE_BITS)?;
         let with_cache = encode_transform_plan_to_vp8l_with_cache(
             width,
             height,
             rgba,
             plan,
-            DEFAULT_COLOR_CACHE_BITS,
+            token_build_options(optimization_level, best_cache_bits),
         )?;
-        if with_cache.len() < best.len() {
+        if best_cache_bits > 0 && with_cache.len() < best.len() {
             best = with_cache;
         }
     }
@@ -696,8 +714,14 @@ fn encode_transform_plan_to_vp8l_with_cache(
     height: usize,
     rgba: &[u8],
     plan: &TransformPlan,
-    color_cache_bits: usize,
+    token_options: TokenBuildOptions,
 ) -> Result<Vec<u8>, EncoderError> {
+    let transform_options = TokenBuildOptions {
+        color_cache_bits: 0,
+        match_chain_depth: 0,
+        use_window_offsets: false,
+        lazy_matching: false,
+    };
     let mut bw = BitWriter::default();
     bw.put_bits((width - 1) as u32, 14)?;
     bw.put_bits((height - 1) as u32, 14)?;
@@ -709,7 +733,13 @@ fn encode_transform_plan_to_vp8l_with_cache(
     bw.put_bits(1, 1)?;
     bw.put_bits(1, 2)?;
     bw.put_bits((plan.cross_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
-    write_image_stream(&mut bw, plan.cross_width, &plan.cross_image, false, 0)?;
+    write_image_stream(
+        &mut bw,
+        plan.cross_width,
+        &plan.cross_image,
+        false,
+        transform_options,
+    )?;
     bw.put_bits(1, 1)?;
     bw.put_bits(0, 2)?;
     bw.put_bits((plan.predictor_bits - MIN_TRANSFORM_BITS) as u32, 3)?;
@@ -718,10 +748,10 @@ fn encode_transform_plan_to_vp8l_with_cache(
         plan.predictor_width,
         &plan.predictor_image,
         false,
-        0,
+        transform_options,
     )?;
     bw.put_bits(0, 1)?;
-    write_image_stream(&mut bw, width, &plan.predicted, true, color_cache_bits)?;
+    write_image_stream(&mut bw, width, &plan.predicted, true, token_options)?;
 
     let bitstream = bw.into_bytes();
     let mut vp8l = Vec::with_capacity(1 + bitstream.len());
@@ -738,47 +768,314 @@ fn find_match_length(argb: &[u32], first: usize, second: usize, max_len: usize) 
     len
 }
 
+fn token_build_options(optimization_level: u8, color_cache_bits: usize) -> TokenBuildOptions {
+    let (match_chain_depth, use_window_offsets, lazy_matching) = match optimization_level {
+        0 => (0, false, false),
+        1 => (MATCH_CHAIN_DEPTH_LEVEL1, false, false),
+        _ => (MATCH_CHAIN_DEPTH_LEVEL2, true, true),
+    };
+    TokenBuildOptions {
+        color_cache_bits,
+        match_chain_depth,
+        use_window_offsets,
+        lazy_matching,
+    }
+}
+
+fn build_window_offsets(width: usize) -> Vec<usize> {
+    const MAX_WINDOW_OFFSETS: usize = 32;
+    let mut by_plane_code = [0usize; MAX_WINDOW_OFFSETS];
+    for y in 0..=6usize {
+        for x in -6isize..=6isize {
+            let offset = y as isize * width as isize + x;
+            if offset <= 0 {
+                continue;
+            }
+            let offset = offset as usize;
+            let plane_code = distance_to_plane_code(width, offset).saturating_sub(1);
+            if plane_code < MAX_WINDOW_OFFSETS {
+                by_plane_code[plane_code] = offset;
+            }
+        }
+    }
+    by_plane_code
+        .into_iter()
+        .filter(|&offset| offset != 0)
+        .collect()
+}
+
+fn min_match_length_for_distance(width: usize, distance: usize) -> usize {
+    if distance == 1 || distance == width {
+        return MIN_LENGTH;
+    }
+    let plane_code = distance_to_plane_code(width, distance);
+    if plane_code <= 32 {
+        MIN_LENGTH
+    } else if plane_code <= 80 {
+        MIN_LENGTH + 1
+    } else if plane_code <= 512 {
+        MIN_LENGTH + 2
+    } else {
+        MIN_LENGTH + 3
+    }
+}
+
+fn match_score(width: usize, distance: usize, length: usize) -> isize {
+    let plane_code = distance_to_plane_code(width, distance);
+    let penalty = if distance == 1 || distance == width {
+        0
+    } else if plane_code <= 32 {
+        1
+    } else if plane_code <= 128 {
+        2
+    } else if plane_code <= 512 {
+        3
+    } else {
+        4
+    };
+    length as isize - penalty
+}
+
+fn consider_match(
+    width: usize,
+    best_match: &mut Option<(usize, usize)>,
+    distance: usize,
+    length: usize,
+) {
+    if length < min_match_length_for_distance(width, distance) {
+        return;
+    }
+
+    let candidate_score = match_score(width, distance, length);
+    if best_match
+        .map(|(best_distance, best_length)| {
+            let best_score = match_score(width, best_distance, best_length);
+            candidate_score > best_score
+                || (candidate_score == best_score
+                    && (length > best_length
+                        || (length == best_length && distance < best_distance)))
+        })
+        .unwrap_or(true)
+    {
+        *best_match = Some((distance, length));
+    }
+}
+
+fn preview_update_match_chain(
+    argb: &[u32],
+    index: usize,
+    heads: &mut [usize],
+    prev: &mut [usize],
+) -> Option<(usize, usize, usize)> {
+    if index + MIN_LENGTH > argb.len() {
+        return None;
+    }
+    let hash = hash_match_pixels(argb, index);
+    let old_prev = prev[index];
+    let old_head = heads[hash];
+    update_match_chain(argb, index, heads, prev);
+    Some((hash, old_prev, old_head))
+}
+
+fn restore_previewed_match_chain(
+    index: usize,
+    preview: Option<(usize, usize, usize)>,
+    heads: &mut [usize],
+    prev: &mut [usize],
+) {
+    if let Some((hash, old_prev, old_head)) = preview {
+        prev[index] = old_prev;
+        heads[hash] = old_head;
+    }
+}
+
+fn hash_match_pixels(argb: &[u32], index: usize) -> usize {
+    let a = argb[index];
+    let b = argb[index + 1].rotate_left(7);
+    let c = argb[index + 2].rotate_left(13);
+    let d = argb[index + 3].rotate_left(21);
+    let hash = a ^ b ^ c ^ d.wrapping_mul(COLOR_CACHE_HASH_MUL);
+    ((hash.wrapping_mul(COLOR_CACHE_HASH_MUL)) >> (32 - MATCH_HASH_BITS)) as usize
+}
+
+fn update_match_chain(argb: &[u32], index: usize, heads: &mut [usize], prev: &mut [usize]) {
+    if index + MIN_LENGTH > argb.len() {
+        return;
+    }
+    let hash = hash_match_pixels(argb, index);
+    prev[index] = heads[hash];
+    heads[hash] = index;
+}
+
+fn find_best_hash_match(
+    width: usize,
+    argb: &[u32],
+    index: usize,
+    max_len: usize,
+    heads: &[usize],
+    prev: &[usize],
+    match_chain_depth: usize,
+) -> Option<(usize, usize)> {
+    if match_chain_depth == 0 || max_len < MIN_LENGTH || index + MIN_LENGTH > argb.len() {
+        return None;
+    }
+
+    let hash = hash_match_pixels(argb, index);
+    let mut candidate = heads[hash];
+    let mut best = None;
+    let mut best_length = 0usize;
+    let mut remaining = match_chain_depth;
+
+    while candidate != usize::MAX && remaining > 0 {
+        remaining -= 1;
+        if candidate >= index {
+            break;
+        }
+        let distance = index - candidate;
+        if distance <= MAX_FALLBACK_DISTANCE {
+            let length = find_match_length(argb, index, candidate, max_len);
+            if length >= MIN_LENGTH
+                && (length > best_length
+                    || (length == best_length
+                        && best
+                            .map(|(best_distance, _)| distance < best_distance)
+                            .unwrap_or(true)))
+            {
+                best = Some((distance, length));
+                best_length = length;
+                if length == max_len {
+                    break;
+                }
+            }
+        }
+        candidate = prev[candidate];
+    }
+
+    if let Some((distance, length)) = best {
+        if distance == 1 || distance == width {
+            return Some((distance, length));
+        }
+        return Some((distance, length));
+    }
+
+    None
+}
+
+fn find_best_window_offset_match(
+    width: usize,
+    argb: &[u32],
+    index: usize,
+    max_len: usize,
+    window_offsets: &[usize],
+) -> Option<(usize, usize)> {
+    let mut best_match = None;
+    for &distance in window_offsets {
+        if distance > index || distance > MAX_FALLBACK_DISTANCE {
+            continue;
+        }
+        let candidate_index = index - distance;
+        let length = find_match_length(argb, index, candidate_index, max_len);
+        consider_match(width, &mut best_match, distance, length);
+    }
+    best_match
+}
+
+fn find_best_match(
+    width: usize,
+    argb: &[u32],
+    index: usize,
+    options: TokenBuildOptions,
+    heads: &[usize],
+    prev: &[usize],
+    window_offsets: &[usize],
+) -> Option<(usize, usize)> {
+    let max_len = (argb.len() - index).min(MAX_LENGTH);
+    let mut best_match = None;
+
+    if index > 0 {
+        let rle_len = find_match_length(argb, index, index - 1, max_len);
+        consider_match(width, &mut best_match, 1, rle_len);
+    }
+    if index >= width {
+        let prev_row_len = find_match_length(argb, index, index - width, max_len);
+        consider_match(width, &mut best_match, width, prev_row_len);
+    }
+    if options.use_window_offsets {
+        if let Some((distance, length)) =
+            find_best_window_offset_match(width, argb, index, max_len, window_offsets)
+        {
+            consider_match(width, &mut best_match, distance, length);
+        }
+    }
+    if let Some((distance, length)) = find_best_hash_match(
+        width,
+        argb,
+        index,
+        max_len,
+        heads,
+        prev,
+        options.match_chain_depth,
+    ) {
+        consider_match(width, &mut best_match, distance, length);
+    }
+
+    best_match
+}
+
 fn build_tokens(
     width: usize,
     argb: &[u32],
-    color_cache_bits: usize,
+    options: TokenBuildOptions,
 ) -> Result<Vec<Token>, EncoderError> {
     if argb.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut tokens = Vec::with_capacity(argb.len());
-    let mut cache = if color_cache_bits > 0 {
-        Some(ColorCache::new(color_cache_bits)?)
+    let mut cache = if options.color_cache_bits > 0 {
+        Some(ColorCache::new(options.color_cache_bits)?)
     } else {
         None
+    };
+    let mut heads = vec![usize::MAX; MATCH_HASH_SIZE];
+    let mut prev = vec![usize::MAX; argb.len()];
+    let window_offsets = if options.use_window_offsets {
+        build_window_offsets(width)
+    } else {
+        Vec::new()
     };
 
     let mut index = 0usize;
     while index < argb.len() {
-        let max_len = (argb.len() - index).min(MAX_LENGTH);
         let cache_key = cache.as_ref().and_then(|cache| cache.lookup(argb[index]));
-        let rle_len = if index == 0 {
-            0
-        } else {
-            find_match_length(argb, index, index - 1, max_len)
-        };
-        let prev_row_len = if index < width {
-            0
-        } else {
-            find_match_length(argb, index, index - width, max_len)
-        };
+        let mut best_match =
+            find_best_match(width, argb, index, options, &heads, &prev, &window_offsets);
 
-        let mut best_match = None;
-        if rle_len >= MIN_LENGTH {
-            best_match = Some((1usize, rle_len));
-        }
-        if prev_row_len >= MIN_LENGTH
-            && best_match
-                .map(|(_, best_length)| prev_row_len > best_length)
-                .unwrap_or(true)
-        {
-            best_match = Some((width, prev_row_len));
+        if options.lazy_matching {
+            if let Some((distance, length)) = best_match {
+                if length < 32 && index + 1 < argb.len() {
+                    let preview = preview_update_match_chain(argb, index, &mut heads, &mut prev);
+                    let next_match = find_best_match(
+                        width,
+                        argb,
+                        index + 1,
+                        options,
+                        &heads,
+                        &prev,
+                        &window_offsets,
+                    );
+                    restore_previewed_match_chain(index, preview, &mut heads, &mut prev);
+
+                    if next_match
+                        .map(|(_, next_length)| next_length + 1 > length)
+                        .unwrap_or(false)
+                    {
+                        best_match = None;
+                    } else {
+                        best_match = Some((distance, length));
+                    }
+                }
+            }
         }
 
         if let Some((distance, length)) = best_match {
@@ -788,18 +1085,23 @@ fn build_tokens(
                     cache.insert(pixel);
                 }
             }
+            for position in index..index + length {
+                update_match_chain(argb, position, &mut heads, &mut prev);
+            }
             index += length;
         } else if let Some(key) = cache_key {
             tokens.push(Token::Cache(key));
             if let Some(cache) = &mut cache {
                 cache.insert(argb[index]);
             }
+            update_match_chain(argb, index, &mut heads, &mut prev);
             index += 1;
         } else {
             tokens.push(Token::Literal(argb[index]));
             if let Some(cache) = &mut cache {
                 cache.insert(argb[index]);
             }
+            update_match_chain(argb, index, &mut heads, &mut prev);
             index += 1;
         }
     }
@@ -1018,6 +1320,47 @@ fn build_histograms(
     Ok([green, red, blue, alpha, dist])
 }
 
+fn apply_color_cache_to_tokens(
+    argb: &[u32],
+    tokens: &[Token],
+    color_cache_bits: usize,
+) -> Result<Vec<Token>, EncoderError> {
+    if color_cache_bits == 0 {
+        return Ok(tokens.to_vec());
+    }
+
+    let mut cache = ColorCache::new(color_cache_bits)?;
+    let mut cached_tokens = Vec::with_capacity(tokens.len());
+    let mut pixel_index = 0usize;
+
+    for &token in tokens {
+        match token {
+            Token::Literal(pixel) => {
+                if let Some(key) = cache.lookup(pixel) {
+                    cached_tokens.push(Token::Cache(key));
+                } else {
+                    cached_tokens.push(Token::Literal(pixel));
+                    cache.insert(pixel);
+                }
+                pixel_index += 1;
+            }
+            Token::Cache(key) => {
+                cached_tokens.push(Token::Cache(key));
+                pixel_index += 1;
+            }
+            Token::Copy { distance, length } => {
+                cached_tokens.push(Token::Copy { distance, length });
+                for &pixel in &argb[pixel_index..pixel_index + length] {
+                    cache.insert(pixel);
+                }
+                pixel_index += length;
+            }
+        }
+    }
+
+    Ok(cached_tokens)
+}
+
 fn write_tokens(
     bw: &mut BitWriter,
     tokens: &[Token],
@@ -1064,16 +1407,15 @@ fn write_tokens(
     Ok(())
 }
 
-fn write_image_stream(
+fn write_image_stream_from_tokens(
     bw: &mut BitWriter,
     width: usize,
-    argb: &[u32],
+    tokens: &[Token],
     allow_meta_huffman: bool,
     color_cache_bits: usize,
 ) -> Result<(), EncoderError> {
-    let tokens = build_tokens(width, argb, color_cache_bits)?;
     let [green_hist, red_hist, blue_hist, alpha_hist, dist_hist] =
-        build_histograms(&tokens, width, color_cache_bits)?;
+        build_histograms(tokens, width, color_cache_bits)?;
 
     let green_codes = HuffmanCode::from_histogram(&green_hist, 15)?;
     let red_codes = HuffmanCode::from_histogram(&red_hist, 15)?;
@@ -1097,7 +1439,7 @@ fn write_image_stream(
 
     write_tokens(
         bw,
-        &tokens,
+        tokens,
         width,
         &green_codes,
         &red_codes,
@@ -1105,6 +1447,63 @@ fn write_image_stream(
         &alpha_codes,
         &dist_codes,
     )
+}
+
+fn write_image_stream(
+    bw: &mut BitWriter,
+    width: usize,
+    argb: &[u32],
+    allow_meta_huffman: bool,
+    options: TokenBuildOptions,
+) -> Result<(), EncoderError> {
+    let base_tokens = build_tokens(
+        width,
+        argb,
+        TokenBuildOptions {
+            color_cache_bits: 0,
+            ..options
+        },
+    )?;
+    let tokens = apply_color_cache_to_tokens(argb, &base_tokens, options.color_cache_bits)?;
+    write_image_stream_from_tokens(
+        bw,
+        width,
+        &tokens,
+        allow_meta_huffman,
+        options.color_cache_bits,
+    )
+}
+
+fn estimate_image_stream_size(
+    width: usize,
+    tokens: &[Token],
+    color_cache_bits: usize,
+    allow_meta_huffman: bool,
+) -> Result<usize, EncoderError> {
+    let mut bw = BitWriter::default();
+    write_image_stream_from_tokens(&mut bw, width, tokens, allow_meta_huffman, color_cache_bits)?;
+    Ok(bw.into_bytes().len())
+}
+
+fn select_best_color_cache_bits(
+    width: usize,
+    argb: &[u32],
+    base_tokens: &[Token],
+    max_cache_bits: usize,
+) -> Result<usize, EncoderError> {
+    let mut best_cache_bits = 0usize;
+    let mut best_size = estimate_image_stream_size(width, base_tokens, 0, true)?;
+
+    for cache_bits in 1..=max_cache_bits {
+        let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
+        let size = estimate_image_stream_size(width, &tokens, cache_bits, true)?;
+        if size < best_size {
+            best_size = size;
+            best_cache_bits = cache_bits;
+        }
+    }
+
+    Ok(best_cache_bits)
 }
 
 /// Encodes RGBA pixels to a raw lossless `VP8L` frame payload with explicit options.
@@ -1120,13 +1519,25 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     let subtract_green = apply_subtract_green_transform(&rgba_to_argb(rgba));
     let global_plan = build_global_transform_plan(width, height, &subtract_green);
     let use_color_cache = options.optimization_level >= 1;
-    let mut best =
-        encode_transform_plan_to_vp8l(width, height, rgba, &global_plan, use_color_cache)?;
+    let mut best = encode_transform_plan_to_vp8l(
+        width,
+        height,
+        rgba,
+        &global_plan,
+        options.optimization_level,
+        use_color_cache,
+    )?;
 
     if options.optimization_level >= 2 {
         let tiled_plan = build_tiled_transform_plan(width, height, &subtract_green);
-        let tiled =
-            encode_transform_plan_to_vp8l(width, height, rgba, &tiled_plan, use_color_cache)?;
+        let tiled = encode_transform_plan_to_vp8l(
+            width,
+            height,
+            rgba,
+            &tiled_plan,
+            options.optimization_level,
+            use_color_cache,
+        )?;
         if tiled.len() < best.len() {
             best = tiled;
         }

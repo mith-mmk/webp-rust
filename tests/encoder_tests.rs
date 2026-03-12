@@ -152,6 +152,52 @@ fn encode_lossless_rgba_to_webp_compresses_flat_runs() {
 }
 
 #[test]
+fn encode_lossless_higher_optimization_helps_repeated_tiles() {
+    let width = 64;
+    let height = 64;
+    let mut rgba = vec![0u8; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let sx = (x % 8) as u8;
+            let sy = (y % 8) as u8;
+            let offset = (y * width + x) * 4;
+            rgba[offset] = sx.saturating_mul(29);
+            rgba[offset + 1] = sy.saturating_mul(31);
+            rgba[offset + 2] = (sx ^ sy).saturating_mul(17);
+            rgba[offset + 3] = 0xff;
+        }
+    }
+
+    let opt0 = encode_lossless_rgba_to_webp_with_options(
+        width,
+        height,
+        &rgba,
+        &LosslessEncodingOptions {
+            optimization_level: 0,
+        },
+    )
+    .unwrap();
+    let opt2 = encode_lossless_rgba_to_webp_with_options(
+        width,
+        height,
+        &rgba,
+        &LosslessEncodingOptions {
+            optimization_level: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(decode(&opt0).unwrap().rgba, rgba);
+    assert_eq!(decode(&opt2).unwrap().rgba, rgba);
+    assert!(
+        opt2.len() < opt0.len(),
+        "expected opt2 to beat opt0 for repeated tiles: opt0={}, opt2={}",
+        opt0.len(),
+        opt2.len()
+    );
+}
+
+#[test]
 fn encode_lossy_rgba_to_vp8_round_trips_as_lossy_frame() {
     let (width, height, rgba) = lossy_sample_rgba();
     let vp8 = encode_lossy_rgba_to_vp8(width, height, &rgba).unwrap();
