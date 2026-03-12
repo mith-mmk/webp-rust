@@ -106,6 +106,23 @@ struct TokenBuildOptions {
     use_window_offsets: bool,
     window_offset_limit: usize,
     lazy_matching: bool,
+    use_traceback: bool,
+    traceback_max_candidates: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TracebackStep {
+    Literal,
+    Copy { distance: usize, length: usize },
+}
+
+#[derive(Debug, Clone)]
+struct TracebackCostModel {
+    literal: Vec<usize>,
+    red: Vec<usize>,
+    blue: Vec<usize>,
+    alpha: Vec<usize>,
+    distance: Vec<usize>,
 }
 
 type HistogramSet = [Vec<u32>; 5];
@@ -1064,6 +1081,8 @@ fn estimate_transform_plan_score(
         use_window_offsets: false,
         window_offset_limit: 0,
         lazy_matching: false,
+        use_traceback: false,
+        traceback_max_candidates: 0,
     };
     let mut score = estimate_token_stream_cost_bytes(
         width,
@@ -1228,6 +1247,8 @@ fn encode_transform_plan_to_vp8l_with_cache(
         use_window_offsets: false,
         window_offset_limit: 0,
         lazy_matching: false,
+        use_traceback: false,
+        traceback_max_candidates: 0,
     };
     let mut bw = BitWriter::default();
     bw.put_bits((width - 1) as u32, 14)?;
@@ -1295,6 +1316,8 @@ fn encode_palette_candidate_to_vp8l(
         use_window_offsets: false,
         window_offset_limit: 0,
         lazy_matching: false,
+        use_traceback: false,
+        traceback_max_candidates: 0,
     };
     let no_cache_options = token_build_options(profile.match_search_level, 0);
     let mut token_options = no_cache_options;
@@ -1378,12 +1401,20 @@ fn token_build_options(match_search_level: u8, color_cache_bits: usize) -> Token
             6 => (MATCH_CHAIN_DEPTH_LEVEL6, true, 128, true),
             _ => (MATCH_CHAIN_DEPTH_LEVEL7, true, 160, true),
         };
+    let (use_traceback, traceback_max_candidates) = match match_search_level {
+        0..=4 => (false, 0),
+        5 => (true, 4),
+        6 => (true, 6),
+        _ => (true, 8),
+    };
     TokenBuildOptions {
         color_cache_bits,
         match_chain_depth,
         use_window_offsets,
         window_offset_limit,
         lazy_matching,
+        use_traceback,
+        traceback_max_candidates,
     }
 }
 
@@ -1739,7 +1770,7 @@ fn find_best_match(
     best_match
 }
 
-fn build_tokens(
+fn build_tokens_greedy(
     width: usize,
     argb: &[u32],
     options: TokenBuildOptions,
@@ -1835,6 +1866,248 @@ fn build_tokens(
     }
 
     Ok(tokens)
+}
+
+fn build_traceback_cost_model(
+    width: usize,
+    tokens: &[Token],
+) -> Result<TracebackCostModel, EncoderError> {
+    let histograms = build_histograms(tokens, width, 0)?;
+    let group = build_group_codes(&histograms)?;
+    Ok(TracebackCostModel {
+        literal: group
+            .green
+            .code_lengths()
+            .iter()
+            .map(|&bits| bits as usize)
+            .collect(),
+        red: group
+            .red
+            .code_lengths()
+            .iter()
+            .map(|&bits| bits as usize)
+            .collect(),
+        blue: group
+            .blue
+            .code_lengths()
+            .iter()
+            .map(|&bits| bits as usize)
+            .collect(),
+        alpha: group
+            .alpha
+            .code_lengths()
+            .iter()
+            .map(|&bits| bits as usize)
+            .collect(),
+        distance: group
+            .dist
+            .code_lengths()
+            .iter()
+            .map(|&bits| bits as usize)
+            .collect(),
+    })
+}
+
+impl TracebackCostModel {
+    fn literal_cost(&self, argb: u32) -> usize {
+        self.alpha[((argb >> 24) & 0xff) as usize]
+            + self.red[((argb >> 16) & 0xff) as usize]
+            + self.literal[((argb >> 8) & 0xff) as usize]
+            + self.blue[(argb & 0xff) as usize]
+    }
+
+    fn copy_cost(
+        &self,
+        width: usize,
+        distance: usize,
+        length: usize,
+    ) -> Result<usize, EncoderError> {
+        let length_prefix = prefix_encode(length)?;
+        let plane_code = distance_to_plane_code(width, distance);
+        let dist_prefix = prefix_encode(plane_code)?;
+        Ok(self.literal[NUM_LITERAL_CODES + length_prefix.symbol]
+            + length_prefix.extra_bits
+            + self.distance[dist_prefix.symbol]
+            + dist_prefix.extra_bits)
+    }
+}
+
+fn push_match_candidate(
+    width: usize,
+    candidates: &mut Vec<(usize, usize)>,
+    distance: usize,
+    length: usize,
+) {
+    if length < min_match_length_for_distance(width, distance) {
+        return;
+    }
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|(existing_distance, _)| *existing_distance == distance)
+    {
+        existing.1 = existing.1.max(length);
+        return;
+    }
+    candidates.push((distance, length));
+}
+
+fn collect_match_candidates(
+    width: usize,
+    argb: &[u32],
+    index: usize,
+    options: TokenBuildOptions,
+    heads: &[usize],
+    prev: &[usize],
+    window_offsets: &[usize],
+) -> Vec<(usize, usize)> {
+    let max_len = (argb.len() - index).min(MAX_LENGTH);
+    let mut candidates = Vec::with_capacity(options.traceback_max_candidates.max(4));
+
+    if index > 0 {
+        let rle_len = find_match_length(argb, index, index - 1, max_len);
+        push_match_candidate(width, &mut candidates, 1, rle_len);
+    }
+    if index >= width {
+        let prev_row_len = find_match_length(argb, index, index - width, max_len);
+        push_match_candidate(width, &mut candidates, width, prev_row_len);
+    }
+    if options.use_window_offsets {
+        for &distance in window_offsets {
+            if distance > index || distance > MAX_FALLBACK_DISTANCE {
+                continue;
+            }
+            let length = find_match_length(argb, index, index - distance, max_len);
+            push_match_candidate(width, &mut candidates, distance, length);
+        }
+    }
+    if options.match_chain_depth > 0 && max_len >= MIN_LENGTH && index + MIN_LENGTH <= argb.len() {
+        let hash = hash_match_pixels(argb, index);
+        let mut candidate = heads[hash];
+        let mut remaining = options.match_chain_depth;
+        while candidate != usize::MAX && remaining > 0 {
+            remaining -= 1;
+            if candidate >= index {
+                break;
+            }
+            let distance = index - candidate;
+            if distance <= MAX_FALLBACK_DISTANCE {
+                let length = find_match_length(argb, index, candidate, max_len);
+                push_match_candidate(width, &mut candidates, distance, length);
+                if length == max_len {
+                    break;
+                }
+            }
+            candidate = prev[candidate];
+        }
+    }
+
+    candidates.sort_by(|lhs, rhs| {
+        let lhs_score = match_gain_bits(width, lhs.0, lhs.1);
+        let rhs_score = match_gain_bits(width, rhs.0, rhs.1);
+        rhs_score
+            .cmp(&lhs_score)
+            .then_with(|| rhs.1.cmp(&lhs.1))
+            .then_with(|| lhs.0.cmp(&rhs.0))
+    });
+    candidates.truncate(options.traceback_max_candidates.max(1));
+    candidates
+}
+
+fn build_tokens_with_traceback(
+    width: usize,
+    argb: &[u32],
+    options: TokenBuildOptions,
+    cost_model: &TracebackCostModel,
+) -> Result<Vec<Token>, EncoderError> {
+    let mut best_costs = vec![usize::MAX; argb.len() + 1];
+    let mut previous = vec![usize::MAX; argb.len() + 1];
+    let mut steps = vec![None; argb.len() + 1];
+    let mut heads = vec![usize::MAX; MATCH_HASH_SIZE];
+    let mut prev = vec![usize::MAX; argb.len()];
+    let window_offsets = if options.use_window_offsets {
+        build_window_offsets(width, options.window_offset_limit)
+    } else {
+        Vec::new()
+    };
+
+    best_costs[0] = 0;
+    for index in 0..argb.len() {
+        let base_cost = best_costs[index];
+        if base_cost == usize::MAX {
+            update_match_chain(argb, index, &mut heads, &mut prev);
+            continue;
+        }
+
+        let literal_cost = base_cost.saturating_add(cost_model.literal_cost(argb[index]));
+        if literal_cost < best_costs[index + 1] {
+            best_costs[index + 1] = literal_cost;
+            previous[index + 1] = index;
+            steps[index + 1] = Some(TracebackStep::Literal);
+        }
+
+        for (distance, length) in
+            collect_match_candidates(width, argb, index, options, &heads, &prev, &window_offsets)
+        {
+            let end = index + length;
+            let copy_cost =
+                base_cost.saturating_add(cost_model.copy_cost(width, distance, length)?);
+            if copy_cost < best_costs[end] {
+                best_costs[end] = copy_cost;
+                previous[end] = index;
+                steps[end] = Some(TracebackStep::Copy { distance, length });
+            }
+        }
+
+        update_match_chain(argb, index, &mut heads, &mut prev);
+    }
+
+    let mut tokens = Vec::with_capacity(argb.len());
+    let mut cursor = argb.len();
+    while cursor > 0 {
+        match steps[cursor].ok_or(EncoderError::Bitstream("traceback path is incomplete"))? {
+            TracebackStep::Literal => {
+                tokens.push(Token::Literal(argb[cursor - 1]));
+                cursor = previous[cursor];
+            }
+            TracebackStep::Copy { distance, length } => {
+                tokens.push(Token::Copy { distance, length });
+                let start = cursor.saturating_sub(length);
+                if previous[cursor] != start {
+                    return Err(EncoderError::Bitstream(
+                        "traceback predecessor is inconsistent",
+                    ));
+                }
+                cursor = start;
+            }
+        }
+        if cursor != 0 && steps[cursor].is_none() {
+            return Err(EncoderError::Bitstream("traceback predecessor is missing"));
+        }
+    }
+    tokens.reverse();
+    Ok(tokens)
+}
+
+fn build_tokens(
+    width: usize,
+    argb: &[u32],
+    options: TokenBuildOptions,
+) -> Result<Vec<Token>, EncoderError> {
+    let greedy = build_tokens_greedy(width, argb, options)?;
+    if !options.use_traceback {
+        return Ok(greedy);
+    }
+
+    let cost_model = build_traceback_cost_model(width, &greedy)?;
+    let traceback = build_tokens_with_traceback(width, argb, options, &cost_model)?;
+    let height = argb.len() / width;
+    let greedy_cost = estimate_image_stream_size(width, height, &greedy, 0, false, 0)?;
+    let traceback_cost = estimate_image_stream_size(width, height, &traceback, 0, false, 0)?;
+    if traceback_cost <= greedy_cost {
+        Ok(traceback)
+    } else {
+        Ok(greedy)
+    }
 }
 
 fn prefix_encode(value: usize) -> Result<PrefixCode, EncoderError> {
@@ -2696,6 +2969,8 @@ fn write_meta_huffman_image_stream(
             use_window_offsets: false,
             window_offset_limit: 0,
             lazy_matching: false,
+            use_traceback: false,
+            traceback_max_candidates: 0,
         },
     )?;
 

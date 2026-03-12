@@ -198,6 +198,23 @@ fn encode_lossless_higher_optimization_helps_repeated_tiles() {
 }
 
 #[test]
+fn encode_lossless_round_trips_pixels_at_optimization_level_nine() {
+    let (width, height, rgba) = sample_rgba();
+    let webp = encode_lossless_rgba_to_webp_with_options(
+        width,
+        height,
+        &rgba,
+        &LosslessEncodingOptions {
+            optimization_level: 9,
+        },
+    )
+    .unwrap();
+
+    let decoded = decode(&webp).unwrap();
+    assert_eq!(decoded.rgba, rgba);
+}
+
+#[test]
 fn encode_lossless_palette_image_round_trips_and_compresses() {
     let width = 32;
     let height = 32;
