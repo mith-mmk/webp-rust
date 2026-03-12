@@ -332,7 +332,7 @@ fn lossless_search_profile(optimization_level: u8) -> LosslessSearchProfile {
 fn lossless_candidate_profiles(optimization_level: u8) -> Vec<LosslessSearchProfile> {
     match optimization_level {
         8 => vec![lossless_search_profile(7)],
-        9 => vec![lossless_search_profile(7), lossless_search_profile(9)],
+        9 => vec![lossless_search_profile(7)],
         _ => vec![lossless_search_profile(optimization_level)],
     }
 }

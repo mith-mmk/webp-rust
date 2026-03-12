@@ -120,8 +120,9 @@ cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
 
 This default lossy path uses `-z 0` for fast encode speed.
 
-Lossless effort also accepts `-z 0..9`. `-z 6` is the balanced preset and
-`z7..9` enable progressively heavier search.
+Lossless effort also accepts `-z 0..9`. `-z 6` is the balanced preset.
+`z7` is the current heavy preset, and `z8..9` currently reuse that path until a
+better high-effort strategy lands.
 
 Heavier lossy search:
 
