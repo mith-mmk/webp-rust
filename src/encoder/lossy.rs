@@ -1,5 +1,6 @@
 use crate::decoder::quant::{AC_TABLE, DC_TABLE};
 use crate::decoder::tree::{COEFFS_PROBA0, COEFFS_UPDATE_PROBA};
+use crate::decoder::vp8i::{DC_PRED, H_PRED, TM_PRED, V_PRED};
 use crate::encoder::vp8_bool_writer::Vp8BoolWriter;
 use crate::encoder::EncoderError;
 use crate::ImageBuffer;
@@ -35,6 +36,13 @@ impl Default for LossyEncodingOptions {
 struct NonZeroContext {
     nz: u8,
     nz_dc: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MacroblockMode {
+    luma: u8,
+    chroma: u8,
+    skip: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -195,27 +203,120 @@ fn clip_byte(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
+fn top_left_sample(plane: &[u8], stride: usize, x: usize, y: usize) -> u8 {
+    if y == 0 {
+        127
+    } else if x == 0 {
+        129
+    } else {
+        plane[(y - 1) * stride + (x - 1)]
+    }
+}
+
+fn top_samples<const N: usize>(
+    plane: &[u8],
+    stride: usize,
+    plane_width: usize,
+    x: usize,
+    y: usize,
+) -> [u8; N] {
+    let mut out = [0u8; N];
+    if y == 0 {
+        out.fill(127);
+        return out;
+    }
+    let row = (y - 1) * stride;
+    for (i, sample) in out.iter_mut().enumerate() {
+        let src_x = (x + i).min(plane_width - 1);
+        *sample = plane[row + src_x];
+    }
+    out
+}
+
+fn left_samples<const N: usize>(plane: &[u8], stride: usize, x: usize, y: usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    if x == 0 {
+        out.fill(129);
+        return out;
+    }
+    let src_x = x - 1;
+    for (i, sample) in out.iter_mut().enumerate() {
+        *sample = plane[(y + i) * stride + src_x];
+    }
+    out
+}
+
+fn fill_prediction_block<const N: usize>(
+    plane: &[u8],
+    stride: usize,
+    plane_width: usize,
+    x: usize,
+    y: usize,
+    mode: u8,
+    out: &mut [u8],
+    out_stride: usize,
+) {
+    match mode {
+        DC_PRED => {
+            let value = dc_predict_value(plane, stride, x, y, N);
+            for row in 0..N {
+                let offset = row * out_stride;
+                out[offset..offset + N].fill(value);
+            }
+        }
+        V_PRED => {
+            let top = top_samples::<N>(plane, stride, plane_width, x, y);
+            for row in 0..N {
+                let offset = row * out_stride;
+                out[offset..offset + N].copy_from_slice(&top);
+            }
+        }
+        H_PRED => {
+            let left = left_samples::<N>(plane, stride, x, y);
+            for (row, value) in left.into_iter().enumerate() {
+                let offset = row * out_stride;
+                out[offset..offset + N].fill(value);
+            }
+        }
+        TM_PRED => {
+            let top = top_samples::<N>(plane, stride, plane_width, x, y);
+            let left = left_samples::<N>(plane, stride, x, y);
+            let top_left = top_left_sample(plane, stride, x, y) as i32;
+            for row in 0..N {
+                let left_value = left[row] as i32;
+                let offset = row * out_stride;
+                for col in 0..N {
+                    out[offset + col] = clip_byte(left_value + top[col] as i32 - top_left);
+                }
+            }
+        }
+        _ => unreachable!("unsupported macroblock prediction mode"),
+    }
+}
+
+fn predict_block<const N: usize>(
+    plane: &mut [u8],
+    stride: usize,
+    plane_width: usize,
+    x: usize,
+    y: usize,
+    mode: u8,
+) {
+    let mut block = vec![0u8; N * N];
+    fill_prediction_block::<N>(plane, stride, plane_width, x, y, mode, &mut block, N);
+    for row in 0..N {
+        let src = row * N;
+        let dst = (y + row) * stride + x;
+        plane[dst..dst + N].copy_from_slice(&block[src..src + N]);
+    }
+}
+
 fn mul1(value: i32) -> i32 {
     ((value * VP8_TRANSFORM_AC3_C1) >> 16) + value
 }
 
 fn mul2(value: i32) -> i32 {
     (value * VP8_TRANSFORM_AC3_C2) >> 16
-}
-
-fn fill_block(
-    plane: &mut [u8],
-    stride: usize,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-    value: u8,
-) {
-    for row in 0..height {
-        let offset = (y + row) * stride + x;
-        plane[offset..offset + width].fill(value);
-    }
 }
 
 fn dc_predict_value(plane: &[u8], stride: usize, x: usize, y: usize, size: usize) -> u8 {
@@ -243,11 +344,6 @@ fn dc_predict_value(plane: &[u8], stride: usize, x: usize, y: usize, size: usize
         }
         (false, false) => 128,
     }
-}
-
-fn predict_dc_block(plane: &mut [u8], stride: usize, x: usize, y: usize, size: usize) {
-    let value = dc_predict_value(plane, stride, x, y, size);
-    fill_block(plane, stride, x, y, size, size, value);
 }
 
 fn add_transform(plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: &[i16; 16]) {
@@ -282,18 +378,20 @@ fn add_transform(plane: &mut [u8], stride: usize, x: usize, y: usize, coeffs: &[
     }
 }
 
-fn forward_transform(
+fn forward_transform_at(
     src: &[u8],
     src_stride: usize,
+    src_x: usize,
+    src_y: usize,
     pred: &[u8],
     pred_stride: usize,
-    x: usize,
-    y: usize,
+    pred_x: usize,
+    pred_y: usize,
 ) -> [i16; 16] {
     let mut tmp = [0i32; 16];
     for row in 0..4 {
-        let src_offset = (y + row) * src_stride + x;
-        let pred_offset = (y + row) * pred_stride + x;
+        let src_offset = (src_y + row) * src_stride + src_x;
+        let pred_offset = (pred_y + row) * pred_stride + pred_x;
         let d0 = src[src_offset] as i32 - pred[pred_offset] as i32;
         let d1 = src[src_offset + 1] as i32 - pred[pred_offset + 1] as i32;
         let d2 = src[src_offset + 2] as i32 - pred[pred_offset + 2] as i32;
@@ -320,6 +418,17 @@ fn forward_transform(
         out[12 + i] = ((a3 * 2_217 - a2 * 5_352 + 51_000) >> 16) as i16;
     }
     out
+}
+
+fn forward_transform(
+    src: &[u8],
+    src_stride: usize,
+    pred: &[u8],
+    pred_stride: usize,
+    x: usize,
+    y: usize,
+) -> [i16; 16] {
+    forward_transform_at(src, src_stride, x, y, pred, pred_stride, x, y)
 }
 
 fn forward_wht(input: &[i16; 16]) -> [i16; 16] {
@@ -410,6 +519,232 @@ fn quantize_block(
         dequantized[index] = dequant;
     }
     (levels, dequantized)
+}
+
+fn non_zero_count(levels: &[i16; 16], first: usize) -> u64 {
+    levels
+        .iter()
+        .enumerate()
+        .skip(first)
+        .filter(|(_, coeff)| **coeff != 0)
+        .count() as u64
+}
+
+fn block_sse(
+    source: &[u8],
+    source_stride: usize,
+    x: usize,
+    y: usize,
+    reconstructed: &[u8],
+    reconstructed_stride: usize,
+    width: usize,
+    height: usize,
+) -> u64 {
+    let mut sse = 0u64;
+    for row in 0..height {
+        let src_offset = (y + row) * source_stride + x;
+        let recon_offset = row * reconstructed_stride;
+        for col in 0..width {
+            let diff = source[src_offset + col] as i32 - reconstructed[recon_offset + col] as i32;
+            sse += (diff * diff) as u64;
+        }
+    }
+    sse
+}
+
+fn mode_score(distortion: u64, non_zero_count: u64, ac_quant: u16) -> u64 {
+    distortion + non_zero_count * u64::from(ac_quant.max(8)) * 8
+}
+
+fn evaluate_luma_mode(
+    source: &Planes,
+    reconstructed: &Planes,
+    mb_x: usize,
+    mb_y: usize,
+    quant: &QuantMatrices,
+    mode: u8,
+) -> u64 {
+    let x = mb_x * 16;
+    let y = mb_y * 16;
+    let mut prediction = [0u8; 16 * 16];
+    fill_prediction_block::<16>(
+        &reconstructed.y,
+        reconstructed.y_stride,
+        reconstructed.y_stride,
+        x,
+        y,
+        mode,
+        &mut prediction,
+        16,
+    );
+    let mut candidate = prediction;
+    let mut y_dc = [0i16; 16];
+    let mut y_coeffs = [[0i16; 16]; 16];
+    let mut non_zero = 0u64;
+
+    for sub_y in 0..4 {
+        for sub_x in 0..4 {
+            let block = sub_y * 4 + sub_x;
+            let coeffs = forward_transform_at(
+                &source.y,
+                source.y_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction,
+                16,
+                sub_x * 4,
+                sub_y * 4,
+            );
+            y_dc[block] = coeffs[0];
+            let mut ac_only = coeffs;
+            ac_only[0] = 0;
+            let (levels, coeffs) = quantize_block(&ac_only, quant.y1[0], quant.y1[1], 1);
+            non_zero += non_zero_count(&levels, 1);
+            y_coeffs[block] = coeffs;
+        }
+    }
+
+    let y2_input = forward_wht(&y_dc);
+    let (y2_levels, y2_coeffs) = quantize_block(&y2_input, quant.y2[0], quant.y2[1], 0);
+    non_zero += non_zero_count(&y2_levels, 0);
+    let y2_dc = inverse_wht(&y2_coeffs);
+    for block in 0..16 {
+        y_coeffs[block][0] = y2_dc[block];
+    }
+
+    for sub_y in 0..4 {
+        for sub_x in 0..4 {
+            let block = sub_y * 4 + sub_x;
+            add_transform(&mut candidate, 16, sub_x * 4, sub_y * 4, &y_coeffs[block]);
+        }
+    }
+
+    let distortion = block_sse(&source.y, source.y_stride, x, y, &candidate, 16, 16, 16);
+    mode_score(distortion, non_zero, quant.y1[1])
+}
+
+fn evaluate_chroma_mode(
+    source: &Planes,
+    reconstructed: &Planes,
+    mb_x: usize,
+    mb_y: usize,
+    quant: &QuantMatrices,
+    mode: u8,
+) -> u64 {
+    let x = mb_x * 8;
+    let y = mb_y * 8;
+    let mut prediction_u = [0u8; 8 * 8];
+    let mut prediction_v = [0u8; 8 * 8];
+    fill_prediction_block::<8>(
+        &reconstructed.u,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        x,
+        y,
+        mode,
+        &mut prediction_u,
+        8,
+    );
+    fill_prediction_block::<8>(
+        &reconstructed.v,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        x,
+        y,
+        mode,
+        &mut prediction_v,
+        8,
+    );
+    let mut candidate_u = prediction_u;
+    let mut candidate_v = prediction_v;
+    let mut non_zero = 0u64;
+
+    for sub_y in 0..2 {
+        for sub_x in 0..2 {
+            let coeffs_u = forward_transform_at(
+                &source.u,
+                source.uv_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction_u,
+                8,
+                sub_x * 4,
+                sub_y * 4,
+            );
+            let (levels_u, coeffs_u) = quantize_block(&coeffs_u, quant.uv[0], quant.uv[1], 0);
+            non_zero += non_zero_count(&levels_u, 0);
+            add_transform(&mut candidate_u, 8, sub_x * 4, sub_y * 4, &coeffs_u);
+
+            let coeffs_v = forward_transform_at(
+                &source.v,
+                source.uv_stride,
+                x + sub_x * 4,
+                y + sub_y * 4,
+                &prediction_v,
+                8,
+                sub_x * 4,
+                sub_y * 4,
+            );
+            let (levels_v, coeffs_v) = quantize_block(&coeffs_v, quant.uv[0], quant.uv[1], 0);
+            non_zero += non_zero_count(&levels_v, 0);
+            add_transform(&mut candidate_v, 8, sub_x * 4, sub_y * 4, &coeffs_v);
+        }
+    }
+
+    let distortion_u = block_sse(&source.u, source.uv_stride, x, y, &candidate_u, 8, 8, 8);
+    let distortion_v = block_sse(&source.v, source.uv_stride, x, y, &candidate_v, 8, 8, 8);
+    mode_score(distortion_u + distortion_v, non_zero, quant.uv[1])
+}
+
+fn choose_macroblock_mode(
+    source: &Planes,
+    reconstructed: &Planes,
+    mb_x: usize,
+    mb_y: usize,
+    quant: &QuantMatrices,
+) -> MacroblockMode {
+    const MODES: [u8; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
+
+    let mut best_luma = DC_PRED;
+    let mut best_luma_score = u64::MAX;
+    for mode in MODES {
+        let score = evaluate_luma_mode(source, reconstructed, mb_x, mb_y, quant, mode);
+        if score < best_luma_score {
+            best_luma = mode;
+            best_luma_score = score;
+        }
+    }
+
+    let mut best_chroma = DC_PRED;
+    let mut best_chroma_score = u64::MAX;
+    for mode in MODES {
+        let score = evaluate_chroma_mode(source, reconstructed, mb_x, mb_y, quant, mode);
+        if score < best_chroma_score {
+            best_chroma = mode;
+            best_chroma_score = score;
+        }
+    }
+
+    MacroblockMode {
+        luma: best_luma,
+        chroma: best_chroma,
+        skip: false,
+    }
+}
+
+fn block_has_non_zero(levels: &[i16; 16], first: usize) -> bool {
+    levels.iter().skip(first).any(|&level| level != 0)
+}
+
+fn compute_skip_probability(modes: &[MacroblockMode]) -> Option<u8> {
+    let total = modes.len();
+    let skip_count = modes.iter().filter(|mode| mode.skip).count();
+    if total == 0 || skip_count == 0 {
+        return None;
+    }
+    let non_skip = total - skip_count;
+    let prob_zero = ((non_skip * 255) + total / 2) / total;
+    Some(prob_zero.clamp(1, 254) as u8)
 }
 
 fn coeff_probs(coeff_type: usize, coeff_index: usize, ctx: usize) -> &'static [u8; 11] {
@@ -517,7 +852,12 @@ fn encode_coefficients(
     true
 }
 
-fn encode_partition0(mb_width: usize, mb_height: usize, base_quant: u8) -> Vec<u8> {
+fn encode_partition0(
+    mb_width: usize,
+    mb_height: usize,
+    base_quant: u8,
+    modes: &[MacroblockMode],
+) -> Vec<u8> {
     let mut writer = Vp8BoolWriter::new(mb_width * mb_height);
     writer.put_bit_uniform(false);
     writer.put_bit_uniform(false);
@@ -545,13 +885,58 @@ fn encode_partition0(mb_width: usize, mb_height: usize, base_quant: u8) -> Vec<u
             }
         }
     }
-    writer.put_bit_uniform(false);
+    let skip_probability = compute_skip_probability(modes);
+    if let Some(prob) = skip_probability {
+        writer.put_bit_uniform(true);
+        writer.put_bits(prob as u32, 8);
+    } else {
+        writer.put_bit_uniform(false);
+    }
 
-    for _ in 0..(mb_width * mb_height) {
+    for mode in modes {
+        if let Some(prob) = skip_probability {
+            writer.put_bit(mode.skip, prob);
+        }
         writer.put_bit(true, 145);
-        writer.put_bit(false, 156);
-        writer.put_bit(false, 163);
-        writer.put_bit(false, 142);
+        match mode.luma {
+            DC_PRED => {
+                writer.put_bit(false, 156);
+                writer.put_bit(false, 163);
+            }
+            V_PRED => {
+                writer.put_bit(false, 156);
+                writer.put_bit(true, 163);
+            }
+            H_PRED => {
+                writer.put_bit(true, 156);
+                writer.put_bit(false, 128);
+            }
+            TM_PRED => {
+                writer.put_bit(true, 156);
+                writer.put_bit(true, 128);
+            }
+            _ => unreachable!("unsupported luma mode"),
+        }
+        match mode.chroma {
+            DC_PRED => {
+                writer.put_bit(false, 142);
+            }
+            V_PRED => {
+                writer.put_bit(true, 142);
+                writer.put_bit(false, 114);
+            }
+            H_PRED => {
+                writer.put_bit(true, 142);
+                writer.put_bit(true, 114);
+                writer.put_bit(false, 183);
+            }
+            TM_PRED => {
+                writer.put_bit(true, 142);
+                writer.put_bit(true, 114);
+                writer.put_bit(true, 183);
+            }
+            _ => unreachable!("unsupported chroma mode"),
+        }
     }
 
     writer.finish()
@@ -563,18 +948,40 @@ fn encode_macroblock(
     reconstructed: &mut Planes,
     mb_x: usize,
     mb_y: usize,
+    mode: MacroblockMode,
     quant: &QuantMatrices,
     top: &mut NonZeroContext,
     left: &mut NonZeroContext,
-) {
+) -> bool {
     let y_x = mb_x * 16;
     let y_y = mb_y * 16;
     let uv_x = mb_x * 8;
     let uv_y = mb_y * 8;
 
-    predict_dc_block(&mut reconstructed.y, reconstructed.y_stride, y_x, y_y, 16);
-    predict_dc_block(&mut reconstructed.u, reconstructed.uv_stride, uv_x, uv_y, 8);
-    predict_dc_block(&mut reconstructed.v, reconstructed.uv_stride, uv_x, uv_y, 8);
+    predict_block::<16>(
+        &mut reconstructed.y,
+        reconstructed.y_stride,
+        reconstructed.y_stride,
+        y_x,
+        y_y,
+        mode.luma,
+    );
+    predict_block::<8>(
+        &mut reconstructed.u,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        uv_x,
+        uv_y,
+        mode.chroma,
+    );
+    predict_block::<8>(
+        &mut reconstructed.v,
+        reconstructed.uv_stride,
+        reconstructed.uv_stride,
+        uv_x,
+        uv_y,
+        mode.chroma,
+    );
 
     let mut y_levels = [[0i16; 16]; 16];
     let mut y_coeffs = [[0i16; 16]; 16];
@@ -605,27 +1012,6 @@ fn encode_macroblock(
     for block in 0..16 {
         y_coeffs[block][0] = y2_dc[block];
     }
-
-    let has_y2 = encode_coefficients(writer, 1, (top.nz_dc + left.nz_dc) as usize, 0, &y2_levels);
-    top.nz_dc = has_y2 as u8;
-    left.nz_dc = has_y2 as u8;
-
-    let mut tnz = top.nz & 0x0f;
-    let mut lnz = left.nz & 0x0f;
-    for sub_y in 0..4 {
-        let mut l = lnz & 1;
-        for sub_x in 0..4 {
-            let block = sub_y * 4 + sub_x;
-            let ctx = (l + (tnz & 1)) as usize;
-            let has_ac = encode_coefficients(writer, 0, ctx, 1, &y_levels[block]);
-            l = has_ac as u8;
-            tnz = (tnz >> 1) | (l << 7);
-        }
-        tnz >>= 4;
-        lnz = (lnz >> 1) | (l << 7);
-    }
-    let mut out_t_nz = tnz;
-    let mut out_l_nz = lnz >> 4;
 
     let mut u_levels = [[0i16; 16]; 4];
     let mut u_coeffs = [[0i16; 16]; 4];
@@ -664,6 +1050,39 @@ fn encode_macroblock(
             v_coeffs[block] = coeffs;
         }
     }
+
+    let skip = !block_has_non_zero(&y2_levels, 0)
+        && y_levels.iter().all(|levels| !block_has_non_zero(levels, 1))
+        && u_levels.iter().all(|levels| !block_has_non_zero(levels, 0))
+        && v_levels.iter().all(|levels| !block_has_non_zero(levels, 0));
+    if skip {
+        top.nz = 0;
+        left.nz = 0;
+        top.nz_dc = 0;
+        left.nz_dc = 0;
+        return true;
+    }
+
+    let has_y2 = encode_coefficients(writer, 1, (top.nz_dc + left.nz_dc) as usize, 0, &y2_levels);
+    top.nz_dc = has_y2 as u8;
+    left.nz_dc = has_y2 as u8;
+
+    let mut tnz = top.nz & 0x0f;
+    let mut lnz = left.nz & 0x0f;
+    for sub_y in 0..4 {
+        let mut l = lnz & 1;
+        for sub_x in 0..4 {
+            let block = sub_y * 4 + sub_x;
+            let ctx = (l + (tnz & 1)) as usize;
+            let has_ac = encode_coefficients(writer, 0, ctx, 1, &y_levels[block]);
+            l = has_ac as u8;
+            tnz = (tnz >> 1) | (l << 7);
+        }
+        tnz >>= 4;
+        lnz = (lnz >> 1) | (l << 7);
+    }
+    let mut out_t_nz = tnz;
+    let mut out_l_nz = lnz >> 4;
 
     let mut tnz_u = top.nz >> 4;
     let mut lnz_u = left.nz >> 4;
@@ -734,6 +1153,8 @@ fn encode_macroblock(
             );
         }
     }
+
+    false
 }
 
 fn encode_token_partition(
@@ -741,28 +1162,32 @@ fn encode_token_partition(
     mb_width: usize,
     mb_height: usize,
     quant: &QuantMatrices,
-) -> (Vec<u8>, Planes) {
+) -> (Vec<u8>, Planes, Vec<MacroblockMode>) {
     let mut writer = Vp8BoolWriter::new(source.y.len() / 4);
     let mut reconstructed = empty_reconstructed_planes(mb_width, mb_height);
     let mut top_contexts = vec![NonZeroContext::default(); mb_width];
+    let mut modes = Vec::with_capacity(mb_width * mb_height);
 
     for mb_y in 0..mb_height {
         let mut left_context = NonZeroContext::default();
         for mb_x in 0..mb_width {
-            encode_macroblock(
+            let mut mode = choose_macroblock_mode(source, &reconstructed, mb_x, mb_y, quant);
+            mode.skip = encode_macroblock(
                 &mut writer,
                 source,
                 &mut reconstructed,
                 mb_x,
                 mb_y,
+                mode,
                 quant,
                 &mut top_contexts[mb_x],
                 &mut left_context,
             );
+            modes.push(mode);
         }
     }
 
-    (writer.finish(), reconstructed)
+    (writer.finish(), reconstructed, modes)
 }
 
 fn build_vp8_frame(
@@ -837,8 +1262,8 @@ pub fn encode_lossy_rgba_to_vp8_with_options(
     let base_quant = base_quantizer_from_quality(options.quality);
     let quant = build_quant_matrices(base_quant);
     let source = rgba_to_yuv420(width, height, rgba, mb_width, mb_height);
-    let partition0 = encode_partition0(mb_width, mb_height, base_quant as u8);
-    let (token_partition, _) = encode_token_partition(&source, mb_width, mb_height, &quant);
+    let (token_partition, _, modes) = encode_token_partition(&source, mb_width, mb_height, &quant);
+    let partition0 = encode_partition0(mb_width, mb_height, base_quant as u8, &modes);
     build_vp8_frame(width, height, &partition0, &token_partition)
 }
 
@@ -914,13 +1339,45 @@ mod tests {
         let base_quant = base_quantizer_from_quality(options.quality);
         let quant = build_quant_matrices(base_quant);
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
-        let partition0 = encode_partition0(mb_width, mb_height, base_quant as u8);
-        let (token_partition, reconstructed) =
+        let (token_partition, reconstructed, modes) =
             encode_token_partition(&source, mb_width, mb_height, &quant);
+        let partition0 = encode_partition0(mb_width, mb_height, base_quant as u8, &modes);
         let vp8 = build_vp8_frame(width, height, &partition0, &token_partition).unwrap();
         let decoded = decode_lossy_vp8_to_yuv(&vp8).unwrap();
         assert_eq!(decoded.y, reconstructed.y);
         assert_eq!(decoded.u, reconstructed.u);
         assert_eq!(decoded.v, reconstructed.v);
+    }
+
+    #[test]
+    fn mode_search_prefers_vertical_prediction_for_repeated_top_rows() {
+        let mb_width = 1;
+        let mb_height = 2;
+        let mut source = empty_reconstructed_planes(mb_width, mb_height);
+        let mut reconstructed = empty_reconstructed_planes(mb_width, mb_height);
+
+        for row in 0..16 {
+            for col in 0..16 {
+                let value = (col as u8).saturating_mul(9);
+                reconstructed.y[row * reconstructed.y_stride + col] = value;
+                source.y[(16 + row) * source.y_stride + col] = value;
+            }
+        }
+
+        for row in 0..8 {
+            for col in 0..8 {
+                let u = (32 + col * 7) as u8;
+                let v = (96 + col * 5) as u8;
+                reconstructed.u[row * reconstructed.uv_stride + col] = u;
+                reconstructed.v[row * reconstructed.uv_stride + col] = v;
+                source.u[(8 + row) * source.uv_stride + col] = u;
+                source.v[(8 + row) * source.uv_stride + col] = v;
+            }
+        }
+
+        let quant = build_quant_matrices(base_quantizer_from_quality(90));
+        let mode = choose_macroblock_mode(&source, &reconstructed, 0, 1, &quant);
+        assert_eq!(mode.luma, V_PRED);
+        assert_eq!(mode.chroma, V_PRED);
     }
 }

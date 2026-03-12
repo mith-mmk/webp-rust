@@ -1,5 +1,6 @@
 use webp_rust::decoder::{
-    decode_lossless_vp8l_to_rgba, decode_lossy_vp8_to_rgba, get_features, WebpFormat,
+    decode_lossless_vp8l_to_rgba, decode_lossy_vp8_to_rgba, get_features, parse_macroblock_headers,
+    WebpFormat,
 };
 use webp_rust::{
     encode_lossless_image_to_webp, encode_lossless_rgba_to_vp8l, encode_lossless_rgba_to_webp,
@@ -173,6 +174,24 @@ fn encode_lossy_rgba_to_webp_sets_lossy_features() {
     assert!(diff < 26.0, "avg diff: {diff}");
     assert_eq!(features.format, WebpFormat::Lossy);
     assert!(!features.has_alpha);
+}
+
+#[test]
+fn encode_lossy_rgba_to_vp8_marks_flat_macroblocks_as_skip() {
+    let width = 64;
+    let height = 64;
+    let mut rgba = vec![0u8; width * height * 4];
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[0x80, 0x80, 0x80, 0xff]);
+    }
+
+    let vp8 = encode_lossy_rgba_to_vp8(width, height, &rgba).unwrap();
+    let headers = parse_macroblock_headers(&vp8).unwrap();
+
+    assert!(
+        headers.macroblocks.iter().any(|header| header.skip),
+        "expected at least one skipped macroblock"
+    );
 }
 
 #[test]
