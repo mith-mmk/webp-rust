@@ -46,6 +46,10 @@ fn average_abs_diff(a: &[u8], b: &[u8]) -> f64 {
         / a.len() as f64
 }
 
+fn lossless_first_transform_type(vp8l: &[u8]) -> Option<u8> {
+    (vp8l.len() > 5 && (vp8l[5] & 1) == 1).then_some((vp8l[5] >> 1) & 0x03)
+}
+
 #[test]
 fn encode_lossless_rgba_to_vp8l_round_trips_pixels() {
     let (width, height, rgba) = sample_rgba();
@@ -195,6 +199,32 @@ fn encode_lossless_higher_optimization_helps_repeated_tiles() {
         opt0.len(),
         opt2.len()
     );
+}
+
+#[test]
+fn encode_lossless_palette_image_uses_color_indexing_transform() {
+    let width = 32;
+    let height = 32;
+    let colors = [
+        [0x00, 0x00, 0x00, 0xff],
+        [0xff, 0x00, 0x00, 0xff],
+        [0x00, 0xff, 0x00, 0xff],
+        [0x00, 0x00, 0xff, 0xff],
+    ];
+    let mut rgba = vec![0u8; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let color = colors[((x / 4) + (y / 4)) % colors.len()];
+            let offset = (y * width + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+
+    let vp8l = encode_lossless_rgba_to_vp8l(width, height, &rgba).unwrap();
+    let decoded = decode_lossless_vp8l_to_rgba(&vp8l).unwrap();
+
+    assert_eq!(decoded.rgba, rgba);
+    assert_eq!(lossless_first_transform_type(&vp8l), Some(3));
 }
 
 #[test]

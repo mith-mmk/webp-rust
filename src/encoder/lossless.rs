@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::encoder::bit_writer::BitWriter;
 use crate::encoder::container::{wrap_still_webp, StillImageChunk};
 use crate::encoder::huffman::{compress_huffman_tree, HuffmanCode};
@@ -20,6 +22,7 @@ const NUM_LITERAL_CODES: usize = 256;
 const NUM_LENGTH_CODES: usize = 24;
 const NUM_DISTANCE_CODES: usize = 40;
 const NUM_CODE_LENGTH_CODES: usize = 19;
+const NUM_HISTOGRAM_PARTITIONS: usize = 4;
 const MIN_HUFFMAN_BITS: usize = 2;
 const NUM_HUFFMAN_BITS: usize = 3;
 const COLOR_CACHE_HASH_MUL: u32 = 0x1e35_a7bd;
@@ -79,11 +82,19 @@ struct TransformPlan {
     predicted: Vec<u32>,
 }
 
+#[derive(Debug, Clone)]
+struct PaletteCandidate {
+    palette: Vec<u32>,
+    packed_width: usize,
+    packed_indices: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TokenBuildOptions {
     color_cache_bits: usize,
     match_chain_depth: usize,
     use_window_offsets: bool,
+    window_offset_limit: usize,
     lazy_matching: bool,
 }
 
@@ -104,6 +115,12 @@ struct MetaHuffmanPlan {
     huffman_xsize: usize,
     assignments: Vec<usize>,
     groups: Vec<HuffmanGroupCodes>,
+}
+
+#[derive(Debug, Clone)]
+struct HistogramCandidate {
+    histograms: HistogramSet,
+    weight: usize,
 }
 
 /// Lossless encoder tuning knobs.
@@ -621,6 +638,75 @@ fn make_uniform_cross_color_transform_image(
     )
 }
 
+fn palette_xbits(palette_size: usize) -> usize {
+    if palette_size <= 2 {
+        3
+    } else if palette_size <= 4 {
+        2
+    } else if palette_size <= 16 {
+        1
+    } else {
+        0
+    }
+}
+
+fn collect_palette(argb: &[u32]) -> Option<Vec<u32>> {
+    let mut unique = HashSet::with_capacity(256);
+    for &pixel in argb {
+        unique.insert(pixel);
+        if unique.len() > 256 {
+            return None;
+        }
+    }
+    let mut palette = unique.into_iter().collect::<Vec<_>>();
+    palette.sort_unstable();
+    Some(palette)
+}
+
+fn build_palette_candidate(
+    width: usize,
+    height: usize,
+    argb: &[u32],
+) -> Result<Option<PaletteCandidate>, EncoderError> {
+    let palette = match collect_palette(argb) {
+        Some(palette) if !palette.is_empty() => palette,
+        _ => return Ok(None),
+    };
+    let xbits = palette_xbits(palette.len());
+    let packed_width = subsample_size(width, xbits);
+    let bits_per_pixel = 8 >> xbits;
+    let pixels_per_byte = 1usize << xbits;
+    let index_by_color = palette
+        .iter()
+        .enumerate()
+        .map(|(index, &color)| (color, index as u8))
+        .collect::<HashMap<_, _>>();
+    let mut packed_indices = vec![0u32; packed_width * height];
+
+    for y in 0..height {
+        for packed_x in 0..packed_width {
+            let mut packed = 0u32;
+            for slot in 0..pixels_per_byte {
+                let x = packed_x * pixels_per_byte + slot;
+                if x >= width {
+                    break;
+                }
+                let index = *index_by_color
+                    .get(&argb[y * width + x])
+                    .ok_or(EncoderError::Bitstream("palette index lookup failed"))?;
+                packed |= (index as u32) << (slot * bits_per_pixel);
+            }
+            packed_indices[y * packed_width + packed_x] = packed << 8;
+        }
+    }
+
+    Ok(Some(PaletteCandidate {
+        palette,
+        packed_width,
+        packed_indices,
+    }))
+}
+
 fn build_global_cross_plan(width: usize, height: usize, subtract_green: &[u32]) -> TransformPlan {
     let cross_transform = estimate_cross_color_transform(subtract_green);
     let (cross_width, _cross_height, cross_transforms, cross_image) =
@@ -749,8 +835,13 @@ fn encode_transform_plan_to_vp8l(
         encode_transform_plan_to_vp8l_with_cache(width, height, rgba, plan, no_cache_options)?;
     if use_color_cache && plan.predicted.len() >= 64 {
         let base_tokens = build_tokens(width, &plan.predicted, no_cache_options)?;
-        let best_cache_bits =
-            select_best_color_cache_bits(width, &plan.predicted, &base_tokens, MAX_CACHE_BITS)?;
+        let best_cache_bits = select_best_color_cache_bits(
+            width,
+            height,
+            &plan.predicted,
+            &base_tokens,
+            MAX_CACHE_BITS,
+        )?;
         let with_cache = encode_transform_plan_to_vp8l_with_cache(
             width,
             height,
@@ -776,6 +867,7 @@ fn encode_transform_plan_to_vp8l_with_cache(
         color_cache_bits: 0,
         match_chain_depth: 0,
         use_window_offsets: false,
+        window_offset_limit: 0,
         lazy_matching: false,
     };
     let mut bw = BitWriter::default();
@@ -822,6 +914,81 @@ fn encode_transform_plan_to_vp8l_with_cache(
     Ok(vp8l)
 }
 
+fn encode_palette_candidate_to_vp8l(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    candidate: &PaletteCandidate,
+    optimization_level: u8,
+    use_color_cache: bool,
+) -> Result<Vec<u8>, EncoderError> {
+    let transform_options = TokenBuildOptions {
+        color_cache_bits: 0,
+        match_chain_depth: 0,
+        use_window_offsets: false,
+        window_offset_limit: 0,
+        lazy_matching: false,
+    };
+    let no_cache_options = token_build_options(optimization_level, 0);
+    let mut token_options = no_cache_options;
+    if use_color_cache && candidate.packed_indices.len() >= 64 {
+        let base_tokens = build_tokens(
+            candidate.packed_width,
+            &candidate.packed_indices,
+            no_cache_options,
+        )?;
+        let best_cache_bits = select_best_color_cache_bits(
+            candidate.packed_width,
+            height,
+            &candidate.packed_indices,
+            &base_tokens,
+            MAX_CACHE_BITS,
+        )?;
+        token_options = token_build_options(optimization_level, best_cache_bits);
+    }
+
+    let mut palette_image = Vec::with_capacity(candidate.palette.len());
+    for (index, &color) in candidate.palette.iter().enumerate() {
+        if index == 0 {
+            palette_image.push(color);
+        } else {
+            palette_image.push(sub_pixels(color, candidate.palette[index - 1]));
+        }
+    }
+
+    let mut bw = BitWriter::default();
+    bw.put_bits((width - 1) as u32, 14)?;
+    bw.put_bits((height - 1) as u32, 14)?;
+    bw.put_bits(rgba_has_alpha(rgba) as u32, 1)?;
+    bw.put_bits(0, 3)?;
+
+    bw.put_bits(1, 1)?;
+    bw.put_bits(3, 2)?;
+    bw.put_bits((candidate.palette.len() - 1) as u32, 8)?;
+    write_image_stream(
+        &mut bw,
+        candidate.palette.len(),
+        &palette_image,
+        false,
+        transform_options,
+    )?;
+
+    bw.put_bits(0, 1)?;
+    write_image_stream(
+        &mut bw,
+        candidate.packed_width,
+        &candidate.packed_indices,
+        true,
+        token_options,
+    )?;
+
+    let bitstream = bw.into_bytes();
+    let mut vp8l = Vec::with_capacity(1 + bitstream.len());
+    vp8l.push(0x2f);
+    vp8l.extend_from_slice(&bitstream);
+    Ok(vp8l)
+}
+
 fn find_match_length(argb: &[u32], first: usize, second: usize, max_len: usize) -> usize {
     let mut len = 0usize;
     while len < max_len && argb[first + len] == argb[second + len] {
@@ -831,31 +998,40 @@ fn find_match_length(argb: &[u32], first: usize, second: usize, max_len: usize) 
 }
 
 fn token_build_options(optimization_level: u8, color_cache_bits: usize) -> TokenBuildOptions {
-    let (match_chain_depth, use_window_offsets, lazy_matching) = match optimization_level {
-        0 => (0, false, false),
-        1 => (MATCH_CHAIN_DEPTH_LEVEL1, false, false),
-        _ => (MATCH_CHAIN_DEPTH_LEVEL2, true, true),
-    };
+    let (match_chain_depth, use_window_offsets, window_offset_limit, lazy_matching) =
+        match optimization_level {
+            0 => (0, false, 0, false),
+            1 => (MATCH_CHAIN_DEPTH_LEVEL1, false, 0, false),
+            _ => (MATCH_CHAIN_DEPTH_LEVEL2, true, 64, true),
+        };
     TokenBuildOptions {
         color_cache_bits,
         match_chain_depth,
         use_window_offsets,
+        window_offset_limit,
         lazy_matching,
     }
 }
 
-fn build_window_offsets(width: usize) -> Vec<usize> {
-    const MAX_WINDOW_OFFSETS: usize = 32;
-    let mut by_plane_code = [0usize; MAX_WINDOW_OFFSETS];
-    for y in 0..=6usize {
-        for x in -6isize..=6isize {
+fn build_window_offsets(width: usize, max_plane_codes: usize) -> Vec<usize> {
+    if max_plane_codes == 0 {
+        return Vec::new();
+    };
+    let radius = if max_plane_codes <= 32 {
+        6isize
+    } else {
+        12isize
+    };
+    let mut by_plane_code = vec![0usize; max_plane_codes];
+    for y in 0..=radius {
+        for x in -radius..=radius {
             let offset = y as isize * width as isize + x;
             if offset <= 0 {
                 continue;
             }
             let offset = offset as usize;
             let plane_code = distance_to_plane_code(width, offset).saturating_sub(1);
-            if plane_code < MAX_WINDOW_OFFSETS {
+            if plane_code < max_plane_codes && by_plane_code[plane_code] == 0 {
                 by_plane_code[plane_code] = offset;
             }
         }
@@ -1102,7 +1278,7 @@ fn build_tokens(
     let mut heads = vec![usize::MAX; MATCH_HASH_SIZE];
     let mut prev = vec![usize::MAX; argb.len()];
     let window_offsets = if options.use_window_offsets {
-        build_window_offsets(width)
+        build_window_offsets(width, options.window_offset_limit)
     } else {
         Vec::new()
     };
@@ -1467,6 +1643,184 @@ fn histogram_cost(histograms: &HistogramSet, codes: &HuffmanGroupCodes) -> usize
             .sum::<usize>()
 }
 
+fn histogram_entropy_cost(histogram: &[u32]) -> f64 {
+    let total = histogram.iter().map(|&count| count as f64).sum::<f64>();
+    if total == 0.0 {
+        return 0.0;
+    }
+
+    histogram
+        .iter()
+        .filter(|&&count| count != 0)
+        .map(|&count| {
+            let count = count as f64;
+            count * (total / count).log2()
+        })
+        .sum()
+}
+
+fn histogram_signature_costs(histograms: &HistogramSet) -> [f64; 3] {
+    [
+        histogram_entropy_cost(&histograms[0]),
+        histogram_entropy_cost(&histograms[1]),
+        histogram_entropy_cost(&histograms[2]),
+    ]
+}
+
+fn histogram_set_entropy_cost(histograms: &HistogramSet) -> f64 {
+    histograms
+        .iter()
+        .map(|histogram| histogram_entropy_cost(histogram))
+        .sum()
+}
+
+fn histogram_merge_penalty(lhs: &HistogramSet, rhs: &HistogramSet) -> f64 {
+    let mut merged = lhs.clone();
+    merge_histograms(&mut merged, rhs);
+    histogram_set_entropy_cost(&merged)
+        - histogram_set_entropy_cost(lhs)
+        - histogram_set_entropy_cost(rhs)
+}
+
+fn histogram_partition_index(
+    value: f64,
+    min_value: f64,
+    max_value: f64,
+    partitions: usize,
+) -> usize {
+    if partitions <= 1 || max_value <= min_value {
+        return 0;
+    }
+
+    let normalized = ((value - min_value) / (max_value - min_value)).clamp(0.0, 1.0);
+    let index = (normalized * partitions as f64) as usize;
+    index.min(partitions - 1)
+}
+
+fn build_entropy_seed_histograms(
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    group_count: usize,
+) -> Vec<HistogramSet> {
+    if group_count == 0 || non_empty_tiles.is_empty() {
+        return Vec::new();
+    }
+
+    let signatures = non_empty_tiles
+        .iter()
+        .map(|&(tile, _)| histogram_signature_costs(&tile_histograms[tile]))
+        .collect::<Vec<_>>();
+
+    let mins = [
+        signatures
+            .iter()
+            .map(|costs| costs[0])
+            .fold(f64::INFINITY, f64::min),
+        signatures
+            .iter()
+            .map(|costs| costs[1])
+            .fold(f64::INFINITY, f64::min),
+        signatures
+            .iter()
+            .map(|costs| costs[2])
+            .fold(f64::INFINITY, f64::min),
+    ];
+    let maxs = [
+        signatures
+            .iter()
+            .map(|costs| costs[0])
+            .fold(f64::NEG_INFINITY, f64::max),
+        signatures
+            .iter()
+            .map(|costs| costs[1])
+            .fold(f64::NEG_INFINITY, f64::max),
+        signatures
+            .iter()
+            .map(|costs| costs[2])
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+
+    let bin_count = NUM_HISTOGRAM_PARTITIONS * NUM_HISTOGRAM_PARTITIONS * NUM_HISTOGRAM_PARTITIONS;
+    let mut bins = vec![None::<HistogramCandidate>; bin_count];
+
+    for (&(tile, weight), signature) in non_empty_tiles.iter().zip(signatures.iter()) {
+        let green_bin =
+            histogram_partition_index(signature[0], mins[0], maxs[0], NUM_HISTOGRAM_PARTITIONS);
+        let red_bin =
+            histogram_partition_index(signature[1], mins[1], maxs[1], NUM_HISTOGRAM_PARTITIONS);
+        let blue_bin =
+            histogram_partition_index(signature[2], mins[2], maxs[2], NUM_HISTOGRAM_PARTITIONS);
+        let bin_index = green_bin * NUM_HISTOGRAM_PARTITIONS * NUM_HISTOGRAM_PARTITIONS
+            + red_bin * NUM_HISTOGRAM_PARTITIONS
+            + blue_bin;
+
+        match &mut bins[bin_index] {
+            Some(candidate) => {
+                merge_histograms(&mut candidate.histograms, &tile_histograms[tile]);
+                candidate.weight += weight;
+            }
+            slot @ None => {
+                let mut histograms = tile_histograms[tile].clone();
+                normalize_histograms(&mut histograms);
+                *slot = Some(HistogramCandidate { histograms, weight });
+            }
+        }
+    }
+
+    let mut candidates = bins.into_iter().flatten().collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    while candidates.len() > group_count {
+        let mut best_pair = None;
+        let mut best_penalty = f64::INFINITY;
+        for lhs in 0..candidates.len() {
+            for rhs in lhs + 1..candidates.len() {
+                let penalty = histogram_merge_penalty(
+                    &candidates[lhs].histograms,
+                    &candidates[rhs].histograms,
+                );
+                if penalty < best_penalty {
+                    best_penalty = penalty;
+                    best_pair = Some((lhs, rhs));
+                }
+            }
+        }
+
+        let Some((lhs, rhs)) = best_pair else {
+            break;
+        };
+        let rhs_candidate = candidates.swap_remove(rhs);
+        merge_histograms(&mut candidates[lhs].histograms, &rhs_candidate.histograms);
+        normalize_histograms(&mut candidates[lhs].histograms);
+        candidates[lhs].weight += rhs_candidate.weight;
+    }
+
+    candidates.sort_by(|lhs, rhs| rhs.weight.cmp(&lhs.weight));
+    candidates
+        .into_iter()
+        .take(group_count)
+        .map(|candidate| candidate.histograms)
+        .collect()
+}
+
+fn build_weighted_seed_histograms(
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    group_count: usize,
+) -> Vec<HistogramSet> {
+    non_empty_tiles
+        .iter()
+        .take(group_count)
+        .map(|&(tile, _)| {
+            let mut histograms = tile_histograms[tile].clone();
+            normalize_histograms(&mut histograms);
+            histograms
+        })
+        .collect()
+}
+
 fn assign_tiles_to_groups(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -1485,6 +1839,81 @@ fn assign_tiles_to_groups(
         }
         assignments[tile] = best_group;
     }
+}
+
+fn refine_meta_huffman_plan(
+    tile_count: usize,
+    color_cache_bits: usize,
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    seed_histograms: Vec<HistogramSet>,
+) -> Result<Option<MetaHuffmanPlan>, EncoderError> {
+    if seed_histograms.len() <= 1 {
+        return Ok(None);
+    }
+
+    let mut group_codes = seed_histograms
+        .iter()
+        .map(build_group_codes)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut assignments = vec![0usize; tile_count];
+
+    for _ in 0..4 {
+        assign_tiles_to_groups(
+            non_empty_tiles,
+            tile_histograms,
+            &group_codes,
+            &mut assignments,
+        );
+
+        let mut remap = vec![usize::MAX; group_codes.len()];
+        let mut merged_histograms = Vec::new();
+        for (group_index, _) in group_codes.iter().enumerate() {
+            let mut histograms = new_histograms(color_cache_bits);
+            let mut used = false;
+            for &(tile, _) in non_empty_tiles {
+                if assignments[tile] == group_index {
+                    merge_histograms(&mut histograms, &tile_histograms[tile]);
+                    used = true;
+                }
+            }
+            if used {
+                normalize_histograms(&mut histograms);
+                remap[group_index] = merged_histograms.len();
+                merged_histograms.push(histograms);
+            }
+        }
+        if merged_histograms.len() <= 1 {
+            return Ok(None);
+        }
+        for &(tile, _) in non_empty_tiles {
+            assignments[tile] = remap[assignments[tile]];
+        }
+        group_codes = merged_histograms
+            .iter()
+            .map(build_group_codes)
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
+    Ok(Some(MetaHuffmanPlan {
+        huffman_bits: 0,
+        huffman_xsize: 0,
+        assignments,
+        groups: group_codes,
+    }))
+}
+
+fn meta_huffman_assignment_cost(
+    non_empty_tiles: &[(usize, usize)],
+    tile_histograms: &[HistogramSet],
+    plan: &MetaHuffmanPlan,
+) -> usize {
+    non_empty_tiles
+        .iter()
+        .map(|&(tile, _)| {
+            histogram_cost(&tile_histograms[tile], &plan.groups[plan.assignments[tile]])
+        })
+        .sum()
 }
 
 fn apply_color_cache_to_tokens(
@@ -1572,64 +2001,30 @@ fn build_meta_huffman_plan(
         return Ok(None);
     }
 
-    let seed_tiles = non_empty_tiles
-        .iter()
-        .take(group_count)
-        .map(|&(index, _)| index)
-        .collect::<Vec<_>>();
-    let mut group_codes = seed_tiles
-        .iter()
-        .map(|&tile| {
-            let mut histograms = tile_histograms[tile].clone();
-            normalize_histograms(&mut histograms);
-            build_group_codes(&histograms)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut assignments = vec![0usize; tile_count];
-    for _ in 0..2 {
-        assign_tiles_to_groups(
+    let mut best_plan = None;
+    let mut best_cost = usize::MAX;
+    for seed_histograms in [
+        build_weighted_seed_histograms(&non_empty_tiles, &tile_histograms, group_count),
+        build_entropy_seed_histograms(&non_empty_tiles, &tile_histograms, group_count),
+    ] {
+        if let Some(mut plan) = refine_meta_huffman_plan(
+            tile_count,
+            color_cache_bits,
             &non_empty_tiles,
             &tile_histograms,
-            &group_codes,
-            &mut assignments,
-        );
-
-        let mut remap = vec![usize::MAX; group_codes.len()];
-        let mut merged_histograms = Vec::new();
-        for (group_index, _) in group_codes.iter().enumerate() {
-            let mut histograms = new_histograms(color_cache_bits);
-            let mut used = false;
-            for &(tile, _) in &non_empty_tiles {
-                if assignments[tile] == group_index {
-                    merge_histograms(&mut histograms, &tile_histograms[tile]);
-                    used = true;
-                }
-            }
-            if used {
-                normalize_histograms(&mut histograms);
-                remap[group_index] = merged_histograms.len();
-                merged_histograms.push(histograms);
+            seed_histograms,
+        )? {
+            plan.huffman_bits = huffman_bits;
+            plan.huffman_xsize = huffman_xsize;
+            let cost = meta_huffman_assignment_cost(&non_empty_tiles, &tile_histograms, &plan);
+            if cost < best_cost {
+                best_cost = cost;
+                best_plan = Some(plan);
             }
         }
-        if merged_histograms.len() <= 1 {
-            return Ok(None);
-        }
-        for &(tile, _) in &non_empty_tiles {
-            assignments[tile] = remap[assignments[tile]];
-        }
-        group_codes = merged_histograms
-            .iter()
-            .map(build_group_codes)
-            .collect::<Result<Vec<_>, _>>()?;
     }
 
-    Ok(Some(MetaHuffmanPlan {
-        huffman_bits,
-        huffman_xsize,
-        assignments,
-        groups: group_codes,
-    }))
+    Ok(best_plan)
 }
 
 fn write_huffman_group(bw: &mut BitWriter, group: &HuffmanGroupCodes) -> Result<(), EncoderError> {
@@ -1796,6 +2191,7 @@ fn write_meta_huffman_image_stream(
             color_cache_bits: 0,
             match_chain_depth: 0,
             use_window_offsets: false,
+            window_offset_limit: 0,
             lazy_matching: false,
         },
     )?;
@@ -1822,26 +2218,40 @@ fn write_image_stream_from_tokens(
             estimate_single_group_image_stream_size(width, tokens, color_cache_bits, true, &group)?;
         let mut best_meta = None;
         let mut best_meta_size = usize::MAX;
-        for &(huffman_bits, max_groups) in &[(5usize, 4usize), (4usize, 4usize)] {
-            for group_count in 2..=max_groups {
-                if let Some(plan) = build_meta_huffman_plan(
+        let meta_candidates: &[(usize, usize)] = if width * height >= 512 * 512 {
+            &[
+                (6usize, 2usize),
+                (5usize, 4usize),
+                (5usize, 6usize),
+                (4usize, 4usize),
+            ]
+        } else {
+            &[
+                (6usize, 2usize),
+                (5usize, 4usize),
+                (5usize, 6usize),
+                (4usize, 4usize),
+                (4usize, 6usize),
+            ]
+        };
+        for &(huffman_bits, group_count) in meta_candidates {
+            if let Some(plan) = build_meta_huffman_plan(
+                width,
+                height,
+                tokens,
+                color_cache_bits,
+                huffman_bits,
+                group_count,
+            )? {
+                let size = estimate_meta_huffman_image_stream_size(
                     width,
-                    height,
                     tokens,
                     color_cache_bits,
-                    huffman_bits,
-                    group_count,
-                )? {
-                    let size = estimate_meta_huffman_image_stream_size(
-                        width,
-                        tokens,
-                        color_cache_bits,
-                        &plan,
-                    )?;
-                    if size < best_meta_size {
-                        best_meta_size = size;
-                        best_meta = Some(plan);
-                    }
+                    &plan,
+                )?;
+                if size < best_meta_size {
+                    best_meta_size = size;
+                    best_meta = Some(plan);
                 }
             }
         }
@@ -1920,6 +2330,7 @@ fn estimate_meta_huffman_image_stream_size(
 
 fn estimate_image_stream_size(
     width: usize,
+    height: usize,
     tokens: &[Token],
     color_cache_bits: usize,
     allow_meta_huffman: bool,
@@ -1928,7 +2339,7 @@ fn estimate_image_stream_size(
     write_image_stream_from_tokens(
         &mut bw,
         width,
-        1,
+        height,
         tokens,
         allow_meta_huffman,
         color_cache_bits,
@@ -1938,16 +2349,17 @@ fn estimate_image_stream_size(
 
 fn select_best_color_cache_bits(
     width: usize,
+    height: usize,
     argb: &[u32],
     base_tokens: &[Token],
     max_cache_bits: usize,
 ) -> Result<usize, EncoderError> {
     let mut best_cache_bits = 0usize;
-    let mut best_size = estimate_image_stream_size(width, base_tokens, 0, false)?;
+    let mut best_size = estimate_image_stream_size(width, height, base_tokens, 0, false)?;
 
     for cache_bits in 1..=max_cache_bits {
         let tokens = apply_color_cache_to_tokens(argb, base_tokens, cache_bits)?;
-        let size = estimate_image_stream_size(width, &tokens, cache_bits, false)?;
+        let size = estimate_image_stream_size(width, height, &tokens, cache_bits, false)?;
         if size < best_size {
             best_size = size;
             best_cache_bits = cache_bits;
@@ -1967,7 +2379,8 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     validate_rgba(width, height, rgba)?;
     validate_options(options)?;
 
-    let subtract_green = apply_subtract_green_transform(&rgba_to_argb(rgba));
+    let argb = rgba_to_argb(rgba);
+    let subtract_green = apply_subtract_green_transform(&argb);
     let use_color_cache = options.optimization_level >= 1;
     let global_plan = build_global_transform_plan(width, height, &subtract_green);
     let mut best = encode_transform_plan_to_vp8l(
@@ -1991,6 +2404,20 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
         )?;
         if tiled.len() < best.len() {
             best = tiled;
+        }
+    }
+
+    if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
+        let palette = encode_palette_candidate_to_vp8l(
+            width,
+            height,
+            rgba,
+            &candidate,
+            options.optimization_level,
+            use_color_cache,
+        )?;
+        if palette.len() < best.len() {
+            best = palette;
         }
     }
 
