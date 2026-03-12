@@ -1,3 +1,5 @@
+use bin_rs::io::write_byte;
+
 use crate::encoder::EncoderError;
 
 #[derive(Debug, Default, Clone)]
@@ -14,7 +16,7 @@ impl BitWriter {
         for bit_index in 0..num_bits {
             let byte_index = self.bit_pos >> 3;
             if byte_index == self.bytes.len() {
-                self.bytes.push(0);
+                write_byte(0, &mut self.bytes);
             }
             let bit = ((value >> bit_index) & 1) as u8;
             self.bytes[byte_index] |= bit << (self.bit_pos & 7);

@@ -1,3 +1,5 @@
+use bin_rs::io::write_byte;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Vp8BoolWriter {
     range: i32,
@@ -31,11 +33,11 @@ impl Vp8BoolWriter {
             if self.run > 0 {
                 let value = if (bits & 0x100) != 0 { 0x00 } else { 0xff };
                 for _ in 0..self.run {
-                    self.bytes.push(value);
+                    write_byte(value, &mut self.bytes);
                 }
                 self.run = 0;
             }
-            self.bytes.push((bits & 0xff) as u8);
+            write_byte((bits & 0xff) as u8, &mut self.bytes);
         } else {
             self.run += 1;
         }

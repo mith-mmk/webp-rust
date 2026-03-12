@@ -1,4 +1,5 @@
 use crate::decoder::vp8i::ALPHA_FLAG;
+use crate::encoder::writer::ByteWriter;
 use crate::encoder::EncoderError;
 
 const EXIF_FLAG: u32 = 0x0000_0008;
@@ -16,26 +17,31 @@ fn padded_len(size: usize) -> Result<usize, EncoderError> {
         .ok_or(EncoderError::InvalidParam("encoded output is too large"))
 }
 
-fn append_chunk(data: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) -> Result<(), EncoderError> {
+fn append_chunk(
+    data: &mut ByteWriter,
+    fourcc: &[u8; 4],
+    payload: &[u8],
+) -> Result<(), EncoderError> {
     let _ = u32::try_from(payload.len())
         .map_err(|_| EncoderError::InvalidParam("encoded output is too large"))?;
-    data.extend_from_slice(fourcc);
-    data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    data.extend_from_slice(payload);
+    data.write_bytes(fourcc);
+    data.write_u32_le(payload.len() as u32);
+    data.write_bytes(payload);
     if payload.len() & 1 == 1 {
-        data.push(0);
+        data.write_byte(0);
     }
     Ok(())
 }
 
-fn extend_riff(body: Vec<u8>) -> Result<Vec<u8>, EncoderError> {
+fn extend_riff(body: ByteWriter) -> Result<Vec<u8>, EncoderError> {
+    let body = body.into_bytes();
     let riff_size = u32::try_from(body.len())
         .map_err(|_| EncoderError::InvalidParam("encoded output is too large"))?;
-    let mut data = Vec::with_capacity(8 + body.len());
-    data.extend_from_slice(b"RIFF");
-    data.extend_from_slice(&riff_size.to_le_bytes());
-    data.extend_from_slice(&body);
-    Ok(data)
+    let mut data = ByteWriter::with_capacity(8 + body.len());
+    data.write_bytes(b"RIFF");
+    data.write_u32_le(riff_size);
+    data.write_bytes(&body);
+    Ok(data.into_bytes())
 }
 
 fn encode_le24(value: usize) -> Result<[u8; 3], EncoderError> {
@@ -64,8 +70,8 @@ pub(crate) fn wrap_still_webp(
             .checked_add(8)
             .and_then(|size| size.checked_add(padded_image_size))
             .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-        let mut body = Vec::with_capacity(body_size);
-        body.extend_from_slice(b"WEBP");
+        let mut body = ByteWriter::with_capacity(body_size);
+        body.write_bytes(b"WEBP");
         append_chunk(&mut body, &image.fourcc, image.payload)?;
         return extend_riff(body);
     }
@@ -78,8 +84,8 @@ pub(crate) fn wrap_still_webp(
         .and_then(|size| size.checked_add(8 + padded_image_size))
         .and_then(|size| size.checked_add(8 + padded_exif_size))
         .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
-    let mut body = Vec::with_capacity(body_size);
-    body.extend_from_slice(b"WEBP");
+    let mut body = ByteWriter::with_capacity(body_size);
+    body.write_bytes(b"WEBP");
 
     let mut flags = EXIF_FLAG;
     if image.has_alpha {
@@ -87,12 +93,12 @@ pub(crate) fn wrap_still_webp(
     }
     let width = encode_le24(image.width)?;
     let height = encode_le24(image.height)?;
-    let mut vp8x_payload = [0u8; 10];
-    vp8x_payload[0..4].copy_from_slice(&flags.to_le_bytes());
-    vp8x_payload[4..7].copy_from_slice(&width);
-    vp8x_payload[7..10].copy_from_slice(&height);
+    let mut vp8x_payload = ByteWriter::with_capacity(10);
+    vp8x_payload.write_u32_le(flags);
+    vp8x_payload.write_bytes(&width);
+    vp8x_payload.write_bytes(&height);
 
-    append_chunk(&mut body, b"VP8X", &vp8x_payload)?;
+    append_chunk(&mut body, b"VP8X", &vp8x_payload.into_bytes())?;
     append_chunk(&mut body, &image.fourcc, image.payload)?;
     append_chunk(&mut body, b"EXIF", exif)?;
     extend_riff(body)

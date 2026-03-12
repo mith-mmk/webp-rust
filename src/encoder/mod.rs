@@ -13,6 +13,7 @@ mod huffman;
 mod lossless;
 mod lossy;
 mod vp8_bool_writer;
+mod writer;
 
 pub use error::EncoderError;
 pub use lossless::{
