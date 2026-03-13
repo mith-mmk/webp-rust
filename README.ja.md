@@ -143,6 +143,5 @@ cargo test --tests
 ## ライセンス
 
 - project code: `LICENSE`
-- bundled libwebp reference sources: `LICENSE-LIBWEBP`
 
 (C) MITH@mmk 2026
