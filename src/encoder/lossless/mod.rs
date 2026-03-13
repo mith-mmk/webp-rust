@@ -1,3 +1,5 @@
+//! Shared state and search profiles for the lossless `VP8L` encoder.
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -176,6 +178,7 @@ pub struct LosslessEncodingOptions {
 }
 
 impl Default for LosslessEncodingOptions {
+    /// Returns the balanced default lossless settings.
     fn default() -> Self {
         Self {
             optimization_level: DEFAULT_OPTIMIZATION_LEVEL,
@@ -184,6 +187,7 @@ impl Default for LosslessEncodingOptions {
 }
 
 impl ColorCache {
+    /// Allocates a lossless color cache with the requested hash width.
     fn new(hash_bits: usize) -> Result<Self, EncoderError> {
         if !(1..=MAX_CACHE_BITS).contains(&hash_bits) {
             return Err(EncoderError::InvalidParam("invalid VP8L color cache size"));
@@ -195,21 +199,25 @@ impl ColorCache {
         })
     }
 
+    /// Computes the cache slot for a packed ARGB pixel.
     fn key(&self, argb: u32) -> usize {
         ((argb.wrapping_mul(COLOR_CACHE_HASH_MUL)) >> self.hash_shift) as usize
     }
 
+    /// Returns the cache key when the pixel is already present.
     fn lookup(&self, argb: u32) -> Option<usize> {
         let key = self.key(argb);
         (self.colors[key] == argb).then_some(key)
     }
 
+    /// Inserts or replaces one packed ARGB pixel in the cache.
     fn insert(&mut self, argb: u32) {
         let key = self.key(argb);
         self.colors[key] = argb;
     }
 }
 
+/// Validates rgba.
 fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), EncoderError> {
     if width == 0 || height == 0 {
         return Err(EncoderError::InvalidParam(
@@ -235,6 +243,7 @@ fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), Encoder
     Ok(())
 }
 
+/// Validates options.
 fn validate_options(options: &LosslessEncodingOptions) -> Result<(), EncoderError> {
     if options.optimization_level > MAX_OPTIMIZATION_LEVEL {
         return Err(EncoderError::InvalidParam(
@@ -244,6 +253,7 @@ fn validate_options(options: &LosslessEncodingOptions) -> Result<(), EncoderErro
     Ok(())
 }
 
+/// Builds the lossless search profile for a given optimization level.
 fn lossless_search_profile(optimization_level: u8) -> LosslessSearchProfile {
     match optimization_level {
         0 => LosslessSearchProfile {
@@ -329,6 +339,7 @@ fn lossless_search_profile(optimization_level: u8) -> LosslessSearchProfile {
     }
 }
 
+/// Expands a lossless optimization level into candidate search profiles.
 fn lossless_candidate_profiles(optimization_level: u8) -> Vec<LosslessSearchProfile> {
     match optimization_level {
         8 => vec![lossless_search_profile(7)],
@@ -337,10 +348,12 @@ fn lossless_candidate_profiles(optimization_level: u8) -> Vec<LosslessSearchProf
     }
 }
 
+/// Returns whether the RGBA input contains any non-opaque pixels.
 fn rgba_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff)
 }
 
+/// Reorders RGBA bytes into packed ARGB pixels.
 fn rgba_to_argb(rgba: &[u8]) -> Vec<u32> {
     rgba.chunks_exact(4)
         .map(|pixel| {

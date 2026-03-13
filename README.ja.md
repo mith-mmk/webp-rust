@@ -1,28 +1,30 @@
 # webp-rust
 
-[English](README.md) | [日本語](README.ja.md) | [Overview (JA)](OVERVIEW.ja.md)
+[English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
-Pure Rust WebP decoder and partial encoder.
+Pure Rust の WebP decoder / encoder です。
 
-## Status
+`OVERVIEW.ja.md` には、RFC 9649 ベースの WebP 技術解説と、この crate の実装方針をまとめています。
 
-- Still image decode: `VP8` lossy, `VP8L` lossless
-- Still image encode: lossy `VP8` and lossless `VP8L` from RGBA
-- Alpha: `ALPH` for lossy still images and lossy animation frames
-- Animation: compositing to RGBA frame sequence
-- Library output: RGBA only
-- BMP output: example only
+## 対応状況
 
-## Library API
+- still image decode: lossy `VP8`, lossless `VP8L`
+- still image encode: lossy `VP8`, lossless `VP8L`
+- alpha: lossy still image と lossy animation frame の `ALPH`
+- animation: RGBA frame sequence への compositing
+- library 出力: RGBA
+- BMP 出力: example のみ
 
-Top-level still-image decode:
+## ライブラリ API
+
+still image の decode:
 
 ```rust
 let image = webp_rust::decode(&data)?;
 println!("{}x{}", image.width, image.height);
 ```
 
-Top-level still-image encode:
+still image の encode:
 
 ```rust
 let webp = webp_rust::encode(
@@ -36,28 +38,27 @@ let lossy = webp_rust::encode_lossy(&image, 0, 90, None)?;
 let lossless = webp_rust::encode_lossless(&image, 2, None)?;
 ```
 
-To embed raw EXIF metadata, pass the chunk payload directly:
+raw EXIF payload をそのまま埋め込む場合:
 
 ```rust
 let webp = webp_rust::encode_lossless(&image, 2, Some(exif_bytes))?;
 ```
 
-Native file input:
+native 環境での file input:
 
 ```rust
 #[cfg(not(target_family = "wasm"))]
 let image = webp_rust::decode_file("input.webp")?;
 ```
 
-Animated WebP is not accepted by `decode` / `decode_file`.
-For animation, use the decoder module directly:
+`decode` / `decode_file` は animated WebP を受けません。animation は decoder module を直接使います。
 
 ```rust
 let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
 ```
 
-Advanced encoder tuning stays in the `encoder` module:
+高度な encode option は `encoder` module 側にあります。
 
 ```rust
 let lossy_options = webp_rust::LossyEncodingOptions {
@@ -80,66 +81,68 @@ let lossless = webp_rust::encoder::encode_lossless_image_to_webp_with_options_an
 )?;
 ```
 
-Current encoder scope is still-image only. The lossy path currently targets
-opaque RGBA input and emits a minimal intra-only `VP8` bitstream. Animated
-encode is not implemented.
+現在の encoder は still image のみです。lossy encode は opaque RGBA を前提にした intra-only `VP8` bitstream を出力します。animation encode は未実装です。
 
 ## Examples
 
-`webp2bmp` converts still WebP to a BMP file and animated WebP to a BMP sequence.
+`webp2bmp` は still WebP を BMP に、animated WebP を連番 BMP に変換します。
 
-Still image:
+still image:
 
 ```bash
 cargo run --example webp2bmp -- _testdata/sample.webp target/sample.bmp
 ```
 
-Animation:
+animation:
 
 ```bash
 cargo run --example webp2bmp -- _testdata/sample_animation.webp target/sample_animation
 ```
 
-This writes:
+出力例:
 
 - `target/sample_animation_0000.bmp`
 - `target/sample_animation_0001.bmp`
 - `...`
 
-`bmp2webp` converts an uncompressed 24bpp or 32bpp BMP file to a still WebP.
+`bmp2webp` は uncompressed 24bpp / 32bpp BMP を still WebP に変換します。
 
-Lossless:
+lossless:
 
 ```bash
 cargo run --example bmp2webp -- --opt-level 6 input.bmp output.webp
 ```
 
-Lossy:
+lossy:
 
 ```bash
 cargo run --example bmp2webp -- --lossy --quality 90 input.bmp output.webp
 ```
 
-This default lossy path uses `-z 0` for fast encode speed.
+デフォルトの lossy path は `-z 0` です。
 
-Lossless effort also accepts `-z 0..9`. `-z 6` is the balanced preset.
-`z7` is the current heavy preset, and `z8..9` currently reuse that path until a
-better high-effort strategy lands.
+lossless effort は `-z 0..9` を受けます。`-z 6` が balanced preset です。`z7` は current heavy preset、`z8..9` は現在この heavy path を再利用しています。
 
-Heavier lossy search:
+より重い lossy search:
 
 ```bash
 cargo run --example bmp2webp -- --lossy --quality 90 -z 9 input.bmp output.webp
 ```
 
-## Tests
+## テスト
 
 ```bash
 cargo test --tests
 ```
 
-## License
+## 関連文書
 
-- Project code: see `LICENSE`
+- [実装概要](OVERVIEW.ja.md)
+- [英語 README](README.md)
+
+## ライセンス
+
+- project code: `LICENSE`
+- bundled libwebp reference sources: `LICENSE-LIBWEBP`
 
 (C) MITH@mmk 2026

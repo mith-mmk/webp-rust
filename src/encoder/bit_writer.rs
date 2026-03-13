@@ -1,3 +1,5 @@
+//! LSB-first bit writer used by the lossless `VP8L` encoder.
+
 use bin_rs::io::write_byte;
 
 use crate::encoder::EncoderError;
@@ -9,6 +11,7 @@ pub(crate) struct BitWriter {
 }
 
 impl BitWriter {
+    /// Appends `num_bits` least-significant bits in LSB-first order.
     pub(crate) fn put_bits(&mut self, value: u32, num_bits: usize) -> Result<(), EncoderError> {
         if num_bits > 32 {
             return Err(EncoderError::Bitstream("bit write is too wide"));
@@ -25,6 +28,7 @@ impl BitWriter {
         Ok(())
     }
 
+    /// Finishes the writer and returns the accumulated bytes.
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }

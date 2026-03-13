@@ -1,10 +1,14 @@
+//! Prediction, transform, and mode-evaluation helpers for lossy encoding.
+
 use super::bitstream::*;
 use super::*;
 
+/// Clamps byte.
 pub(super) fn clip_byte(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
+/// Internal helper for top left sample.
 pub(super) fn top_left_sample(plane: &[u8], stride: usize, x: usize, y: usize) -> u8 {
     if y == 0 {
         127
@@ -15,6 +19,7 @@ pub(super) fn top_left_sample(plane: &[u8], stride: usize, x: usize, y: usize) -
     }
 }
 
+/// Internal helper for top samples.
 pub(super) fn top_samples<const N: usize>(
     plane: &[u8],
     stride: usize,
@@ -35,6 +40,7 @@ pub(super) fn top_samples<const N: usize>(
     out
 }
 
+/// Internal helper for top samples luma4.
 pub(super) fn top_samples_luma4(
     plane: &[u8],
     stride: usize,
@@ -76,6 +82,7 @@ pub(super) fn top_samples_luma4(
     out
 }
 
+/// Internal helper for left samples.
 pub(super) fn left_samples<const N: usize>(
     plane: &[u8],
     stride: usize,
@@ -94,14 +101,17 @@ pub(super) fn left_samples<const N: usize>(
     out
 }
 
+/// Averages two samples with integer rounding.
 pub(super) fn avg2(a: u8, b: u8) -> u8 {
     ((a as u16 + b as u16 + 1) >> 1) as u8
 }
 
+/// Averages three samples with integer rounding.
 pub(super) fn avg3(a: u8, b: u8, c: u8) -> u8 {
     ((a as u16 + 2 * b as u16 + c as u16 + 2) >> 2) as u8
 }
 
+/// Internal helper for fill prediction block.
 pub(super) fn fill_prediction_block<const N: usize>(
     plane: &[u8],
     stride: usize,
@@ -150,6 +160,7 @@ pub(super) fn fill_prediction_block<const N: usize>(
     }
 }
 
+/// Internal helper for fill luma4 prediction block.
 pub(super) fn fill_luma4_prediction_block(
     plane: &[u8],
     stride: usize,
@@ -324,6 +335,7 @@ pub(super) fn fill_luma4_prediction_block(
     }
 }
 
+/// Predicts block.
 pub(super) fn predict_block<const N: usize>(
     plane: &mut [u8],
     stride: usize,
@@ -341,6 +353,7 @@ pub(super) fn predict_block<const N: usize>(
     }
 }
 
+/// Predicts luma4 block.
 pub(super) fn predict_luma4_block(
     plane: &mut [u8],
     stride: usize,
@@ -358,6 +371,7 @@ pub(super) fn predict_luma4_block(
     }
 }
 
+/// Copies block4.
 pub(super) fn copy_block4(plane: &[u8], stride: usize, x: usize, y: usize) -> [u8; 16] {
     let mut block = [0u8; 16];
     for row in 0..4 {
@@ -367,6 +381,7 @@ pub(super) fn copy_block4(plane: &[u8], stride: usize, x: usize, y: usize) -> [u
     block
 }
 
+/// Restores block4.
 pub(super) fn restore_block4(
     plane: &mut [u8],
     stride: usize,
@@ -380,6 +395,7 @@ pub(super) fn restore_block4(
     }
 }
 
+/// Copies block4 from buffer.
 pub(super) fn copy_block4_from_buffer(
     buffer: &[u8],
     stride: usize,
@@ -394,6 +410,7 @@ pub(super) fn copy_block4_from_buffer(
     block
 }
 
+/// Copies block16.
 pub(super) fn copy_block16(plane: &[u8], stride: usize, x: usize, y: usize) -> [u8; 256] {
     let mut block = [0u8; 256];
     for row in 0..16 {
@@ -403,6 +420,7 @@ pub(super) fn copy_block16(plane: &[u8], stride: usize, x: usize, y: usize) -> [
     block
 }
 
+/// Restores block16.
 pub(super) fn restore_block16(
     plane: &mut [u8],
     stride: usize,
@@ -416,14 +434,17 @@ pub(super) fn restore_block16(
     }
 }
 
+/// Applies the first scaled multiply used by the VP8 transform.
 pub(super) fn mul1(value: i32) -> i32 {
     ((value * VP8_TRANSFORM_AC3_C1) >> 16) + value
 }
 
+/// Applies the second scaled multiply used by the VP8 transform.
 pub(super) fn mul2(value: i32) -> i32 {
     (value * VP8_TRANSFORM_AC3_C2) >> 16
 }
 
+/// Internal helper for dc predict value.
 pub(super) fn dc_predict_value(plane: &[u8], stride: usize, x: usize, y: usize, size: usize) -> u8 {
     let has_top = y > 0;
     let has_left = x > 0;
@@ -451,6 +472,7 @@ pub(super) fn dc_predict_value(plane: &[u8], stride: usize, x: usize, y: usize, 
     }
 }
 
+/// Internal helper for add transform.
 pub(super) fn add_transform(
     plane: &mut [u8],
     stride: usize,
@@ -489,6 +511,7 @@ pub(super) fn add_transform(
     }
 }
 
+/// Internal helper for forward transform at.
 pub(super) fn forward_transform_at(
     src: &[u8],
     src_stride: usize,
@@ -531,6 +554,7 @@ pub(super) fn forward_transform_at(
     out
 }
 
+/// Internal helper for forward transform.
 pub(super) fn forward_transform(
     src: &[u8],
     src_stride: usize,
@@ -542,6 +566,7 @@ pub(super) fn forward_transform(
     forward_transform_at(src, src_stride, x, y, pred, pred_stride, x, y)
 }
 
+/// Internal helper for forward wht.
 pub(super) fn forward_wht(input: &[i16; 16]) -> [i16; 16] {
     let mut tmp = [0i32; 16];
     for row in 0..4 {
@@ -574,6 +599,7 @@ pub(super) fn forward_wht(input: &[i16; 16]) -> [i16; 16] {
     out
 }
 
+/// Internal helper for inverse wht.
 pub(super) fn inverse_wht(input: &[i16; 16]) -> [i16; 16] {
     let mut tmp = [0i32; 16];
     for i in 0..4 {
@@ -603,6 +629,7 @@ pub(super) fn inverse_wht(input: &[i16; 16]) -> [i16; 16] {
     out
 }
 
+/// Quantizes coefficient.
 pub(super) fn quantize_coefficient(coeff: i16, quant: u16) -> (i16, i16) {
     if quant == 0 {
         return (0, 0);
@@ -615,6 +642,7 @@ pub(super) fn quantize_coefficient(coeff: i16, quant: u16) -> (i16, i16) {
     (level as i16, (level * quant) as i16)
 }
 
+/// Quantizes block.
 pub(super) fn quantize_block(
     coeffs: &[i16; 16],
     dc_quant: u16,
@@ -632,6 +660,7 @@ pub(super) fn quantize_block(
     (levels, dequantized)
 }
 
+/// Dequantizes levels.
 pub(super) fn dequantize_levels(levels: &[i16; 16], dc_quant: u16, ac_quant: u16) -> [i16; 16] {
     let mut dequantized = [0i16; 16];
     for (index, level) in levels.iter().copied().enumerate() {
@@ -641,12 +670,14 @@ pub(super) fn dequantize_levels(levels: &[i16; 16], dc_quant: u16, ac_quant: u16
     dequantized
 }
 
+/// Internal helper for reconstruct from prediction.
 pub(super) fn reconstruct_from_prediction(prediction: &[u8; 16], coeffs: &[i16; 16]) -> [u8; 16] {
     let mut block = *prediction;
     add_transform(&mut block, 4, 0, 0, coeffs);
     block
 }
 
+/// Internal helper for block sse 4x4.
 pub(super) fn block_sse_4x4(
     source: &[u8],
     stride: usize,
@@ -666,6 +697,7 @@ pub(super) fn block_sse_4x4(
     sse
 }
 
+/// Internal helper for reconstruct luma16 from prediction.
 pub(super) fn reconstruct_luma16_from_prediction(
     prediction: &[u8; 256],
     ac_coeffs: &[[i16; 16]; 16],
@@ -683,6 +715,7 @@ pub(super) fn reconstruct_luma16_from_prediction(
     (candidate, y2_dc)
 }
 
+/// Internal helper for refine levels greedy.
 pub(super) fn refine_levels_greedy(
     source: &[u8],
     source_stride: usize,
@@ -739,6 +772,7 @@ pub(super) fn refine_levels_greedy(
     coeffs
 }
 
+/// Internal helper for refine y2 levels greedy.
 pub(super) fn refine_y2_levels_greedy(
     source: &[u8],
     source_stride: usize,
@@ -795,6 +829,7 @@ pub(super) fn refine_y2_levels_greedy(
     coeffs
 }
 
+/// Optionally refine levels.
 pub(super) fn maybe_refine_levels(
     enabled: bool,
     source: &[u8],
@@ -832,6 +867,7 @@ pub(super) fn maybe_refine_levels(
     }
 }
 
+/// Optionally refine y2 levels.
 pub(super) fn maybe_refine_y2_levels(
     profile: &LossySearchProfile,
     source: &[u8],
@@ -867,10 +903,12 @@ pub(super) fn maybe_refine_y2_levels(
     }
 }
 
+/// Computes a rate-distortion score for the current candidate.
 pub(super) fn rd_score(distortion: u64, rate: u32, lambda: u32) -> u64 {
     distortion * 256 + u64::from(rate) * u64::from(lambda.max(1))
 }
 
+/// Internal helper for i16 mode rate.
 pub(super) fn i16_mode_rate(mode: u8) -> u32 {
     let mut rate = bit_cost(true, 145);
     match mode {
@@ -895,6 +933,7 @@ pub(super) fn i16_mode_rate(mode: u8) -> u32 {
     rate
 }
 
+/// Internal helper for uv mode rate.
 pub(super) fn uv_mode_rate(mode: u8) -> u32 {
     match mode {
         DC_PRED => bit_cost(false, 142),
@@ -905,6 +944,7 @@ pub(super) fn uv_mode_rate(mode: u8) -> u32 {
     }
 }
 
+/// Internal helper for block sse.
 pub(super) fn block_sse(
     source: &[u8],
     source_stride: usize,
@@ -927,6 +967,7 @@ pub(super) fn block_sse(
     sse
 }
 
+/// Internal helper for plane sse region.
 pub(super) fn plane_sse_region(
     source: &[u8],
     source_stride: usize,
@@ -947,6 +988,7 @@ pub(super) fn plane_sse_region(
     sse
 }
 
+/// Internal helper for yuv sse.
 pub(super) fn yuv_sse(
     source: &Planes,
     width: usize,
@@ -981,6 +1023,7 @@ pub(super) fn yuv_sse(
     ))
 }
 
+/// Internal helper for evaluate luma mode.
 pub(super) fn evaluate_luma_mode(
     source: &Planes,
     reconstructed: &Planes,
@@ -1119,6 +1162,7 @@ pub(super) fn evaluate_luma_mode(
     rd_score(distortion, rate, rd.i16) + u64::from(i16_mode_rate(mode)) * u64::from(rd.mode.max(1))
 }
 
+/// Internal helper for evaluate luma4 mode.
 pub(super) fn evaluate_luma4_mode(
     source: &Planes,
     reconstructed: &mut Planes,
@@ -1278,6 +1322,7 @@ pub(super) fn evaluate_luma4_mode(
     )
 }
 
+/// Internal helper for evaluate chroma mode.
 pub(super) fn evaluate_chroma_mode(
     source: &Planes,
     reconstructed: &Planes,
@@ -1415,6 +1460,7 @@ pub(super) fn evaluate_chroma_mode(
         + u64::from(uv_mode_rate(mode)) * u64::from(rd.mode.max(1))
 }
 
+/// Internal helper for fast luma predictor score.
 pub(super) fn fast_luma_predictor_score(
     source: &Planes,
     reconstructed: &Planes,
@@ -1438,6 +1484,7 @@ pub(super) fn fast_luma_predictor_score(
     block_sse(&source.y, source.y_stride, x, y, &prediction, 16, 16, 16)
 }
 
+/// Internal helper for fast chroma predictor score.
 pub(super) fn fast_chroma_predictor_score(
     source: &Planes,
     reconstructed: &Planes,
@@ -1473,6 +1520,7 @@ pub(super) fn fast_chroma_predictor_score(
         + block_sse(&source.v, source.uv_stride, x, y, &prediction_v, 8, 8, 8)
 }
 
+/// Chooses macroblock mode.
 pub(super) fn choose_macroblock_mode(
     source: &Planes,
     reconstructed: &mut Planes,

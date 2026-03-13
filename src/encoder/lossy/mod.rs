@@ -1,3 +1,5 @@
+//! Shared state and search profiles for the lossy `VP8` encoder.
+
 use crate::decoder::decode_lossy_vp8_to_yuv;
 use crate::decoder::quant::{AC_TABLE, DC_TABLE};
 use crate::decoder::tree::{BMODES_PROBA, COEFFS_PROBA0, COEFFS_UPDATE_PROBA, Y_MODES_INTRA4};
@@ -129,6 +131,7 @@ struct LossySearchProfile {
     update_probabilities: bool,
 }
 
+/// Validates rgba.
 fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), EncoderError> {
     if width == 0 || height == 0 {
         return Err(EncoderError::InvalidParam(
@@ -157,6 +160,7 @@ fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), Encoder
     Ok(())
 }
 
+/// Validates options.
 fn validate_options(options: &LossyEncodingOptions) -> Result<(), EncoderError> {
     if options.quality > 100 {
         return Err(EncoderError::InvalidParam(
@@ -171,10 +175,12 @@ fn validate_options(options: &LossyEncodingOptions) -> Result<(), EncoderError> 
     Ok(())
 }
 
+/// Converts a user quality value into the base VP8 quantizer.
 fn base_quantizer_from_quality(quality: u8) -> i32 {
     (((100 - quality as i32) * 127) + 50) / 100
 }
 
+/// Builds quant matrices.
 fn build_quant_matrices(base_q: i32) -> QuantMatrices {
     let q = base_q.clamp(0, 127) as usize;
     QuantMatrices {
@@ -187,6 +193,7 @@ fn build_quant_matrices(base_q: i32) -> QuantMatrices {
     }
 }
 
+/// Builds rd multipliers.
 fn build_rd_multipliers(quant: &QuantMatrices) -> RdMultipliers {
     let q_i4 = u32::from(quant.y1[1].max(8));
     let q_i16 = u32::from(quant.y2[1].max(8));
@@ -199,10 +206,12 @@ fn build_rd_multipliers(quant: &QuantMatrices) -> RdMultipliers {
     }
 }
 
+/// Internal helper for clipped quantizer.
 fn clipped_quantizer(value: i32) -> u8 {
     value.clamp(0, 127) as u8
 }
 
+/// Internal helper for filter candidates.
 fn filter_candidates(base_quant: i32) -> Vec<FilterConfig> {
     let mut levels = vec![
         0u8,
@@ -223,6 +232,7 @@ fn filter_candidates(base_quant: i32) -> Vec<FilterConfig> {
         .collect()
 }
 
+/// Internal helper for heuristic filter.
 fn heuristic_filter(base_quant: i32) -> FilterConfig {
     let level = if base_quant <= 10 {
         0
@@ -236,6 +246,7 @@ fn heuristic_filter(base_quant: i32) -> FilterConfig {
     }
 }
 
+/// Builds the lossy search profile for a given optimization level.
 fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
     match optimization_level {
         0 => LossySearchProfile {
@@ -311,10 +322,12 @@ fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
     }
 }
 
+/// Returns whether the current lossy effort level should exhaustively search segments.
 fn use_exhaustive_segment_search(optimization_level: u8) -> bool {
     optimization_level >= 9
 }
 
+/// Returns whether the current lossy effort level should exhaustively search loop filters.
 fn use_exhaustive_filter_search(optimization_level: u8, mb_count: usize) -> bool {
     if optimization_level >= 9 {
         return true;
@@ -325,6 +338,7 @@ fn use_exhaustive_filter_search(optimization_level: u8, mb_count: usize) -> bool
     mb_count < 1_024
 }
 
+/// Internal helper for segment with uniform filter.
 fn segment_with_uniform_filter(segment: &SegmentConfig, level: u8) -> SegmentConfig {
     let mut filtered = segment.clone();
     if filtered.use_segment {
@@ -333,6 +347,7 @@ fn segment_with_uniform_filter(segment: &SegmentConfig, level: u8) -> SegmentCon
     filtered
 }
 
+/// Looks up a probability from a pair of neighboring context flags.
 fn get_proba(a: usize, b: usize) -> u8 {
     let total = a + b;
     if total == 0 {
@@ -342,10 +357,12 @@ fn get_proba(a: usize, b: usize) -> u8 {
     }
 }
 
+/// Builds segment quantizers.
 fn build_segment_quantizers(segment: &SegmentConfig) -> [QuantMatrices; NUM_MB_SEGMENTS] {
     std::array::from_fn(|index| build_quant_matrices(segment.quantizer[index] as i32))
 }
 
+/// Internal helper for disabled segment config.
 fn disabled_segment_config(mb_count: usize, base_quant: u8) -> SegmentConfig {
     SegmentConfig {
         use_segment: false,
@@ -357,24 +374,29 @@ fn disabled_segment_config(mb_count: usize, base_quant: u8) -> SegmentConfig {
     }
 }
 
+/// Internal helper for rgb to y.
 fn rgb_to_y(r: u8, g: u8, b: u8) -> u8 {
     let luma = 16_839 * r as i32 + 33_059 * g as i32 + 6_420 * b as i32;
     ((luma + YUV_HALF + (16 << YUV_FIX)) >> YUV_FIX) as u8
 }
 
+/// Clamps uv.
 fn clip_uv(value: i32, rounding: i32) -> u8 {
     let uv = (value + rounding + (128 << (YUV_FIX + 2))) >> (YUV_FIX + 2);
     uv.clamp(0, 255) as u8
 }
 
+/// Internal helper for rgb to u.
 fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
     clip_uv(-9_719 * r - 19_081 * g + 28_800 * b, YUV_HALF << 2)
 }
 
+/// Internal helper for rgb to v.
 fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
     clip_uv(28_800 * r - 24_116 * g - 4_684 * b, YUV_HALF << 2)
 }
 
+/// Internal helper for rgba to yuv420.
 fn rgba_to_yuv420(
     width: usize,
     height: usize,
@@ -428,6 +450,7 @@ fn rgba_to_yuv420(
     }
 }
 
+/// Internal helper for empty reconstructed planes.
 fn empty_reconstructed_planes(mb_width: usize, mb_height: usize) -> Planes {
     let y_stride = mb_width * 16;
     let uv_stride = mb_width * 8;
@@ -442,6 +465,7 @@ fn empty_reconstructed_planes(mb_width: usize, mb_height: usize) -> Planes {
     }
 }
 
+/// Internal helper for macroblock activity.
 fn macroblock_activity(source: &Planes, mb_x: usize, mb_y: usize) -> u32 {
     let x0 = mb_x * 16;
     let y0 = mb_y * 16;
@@ -465,6 +489,7 @@ fn macroblock_activity(source: &Planes, mb_x: usize, mb_y: usize) -> u32 {
     activity
 }
 
+/// Builds segment probs.
 fn build_segment_probs(counts: &[usize; NUM_MB_SEGMENTS]) -> [u8; MB_FEATURE_TREE_PROBS] {
     [
         get_proba(counts[0] + counts[1], counts[2] + counts[3]),
@@ -473,6 +498,7 @@ fn build_segment_probs(counts: &[usize; NUM_MB_SEGMENTS]) -> [u8; MB_FEATURE_TRE
     ]
 }
 
+/// Builds segment config.
 fn build_segment_config(
     activities: &[u32],
     sorted_activities: &[u32],
@@ -522,6 +548,7 @@ fn build_segment_config(
     })
 }
 
+/// Builds multi segment config.
 fn build_multi_segment_config(
     activities: &[u32],
     sorted_activities: &[u32],
@@ -581,6 +608,7 @@ fn build_multi_segment_config(
     })
 }
 
+/// Builds segment candidates.
 fn build_segment_candidates(
     source: &Planes,
     mb_width: usize,

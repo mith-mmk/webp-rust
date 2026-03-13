@@ -1,10 +1,14 @@
+//! Partition, coefficient, and mode bitstream helpers for lossy encoding.
+
 use super::predict::*;
 use super::*;
 
+/// Internal helper for block has non zero.
 pub(super) fn block_has_non_zero(levels: &[i16; 16], first: usize) -> bool {
     levels.iter().skip(first).any(|&level| level != 0)
 }
 
+/// Computes skip probability.
 pub(super) fn compute_skip_probability(modes: &[MacroblockMode]) -> Option<u8> {
     const SKIP_PROBA_THRESHOLD: u8 = 250;
     let total = modes.len();
@@ -18,6 +22,7 @@ pub(super) fn compute_skip_probability(modes: &[MacroblockMode]) -> Option<u8> {
     (probability < SKIP_PROBA_THRESHOLD).then_some(probability)
 }
 
+/// Internal helper for intra4 tree contains.
 pub(super) fn intra4_tree_contains(node: i8, mode: u8) -> bool {
     if node <= 0 {
         return (-node) as u8 == mode;
@@ -27,6 +32,7 @@ pub(super) fn intra4_tree_contains(node: i8, mode: u8) -> bool {
         || intra4_tree_contains(Y_MODES_INTRA4[2 * node + 1], mode)
 }
 
+/// Internal helper for walk intra4 mode bits.
 pub(super) fn walk_intra4_mode_bits<F: FnMut(bool, u8)>(
     top_mode: u8,
     left_mode: u8,
@@ -53,6 +59,7 @@ pub(super) fn walk_intra4_mode_bits<F: FnMut(bool, u8)>(
     walk(0, mode, probs, emit);
 }
 
+/// Encodes intra4 mode.
 pub(super) fn encode_intra4_mode(
     writer: &mut Vp8BoolWriter,
     top_mode: u8,
@@ -64,6 +71,7 @@ pub(super) fn encode_intra4_mode(
     });
 }
 
+/// Internal helper for intra4 mode rate.
 pub(super) fn intra4_mode_rate(top_mode: u8, left_mode: u8, mode: u8) -> u32 {
     let mut rate = 0u32;
     walk_intra4_mode_bits(top_mode, left_mode, mode, &mut |bit, prob| {
@@ -72,6 +80,7 @@ pub(super) fn intra4_mode_rate(top_mode: u8, left_mode: u8, mode: u8) -> u32 {
     rate
 }
 
+/// Updates mode cache.
 pub(super) fn update_mode_cache(mode: &MacroblockMode, top: &mut [u8], left: &mut [u8; 4]) {
     if mode.luma == B_PRED {
         for sub_y in 0..4 {
@@ -88,6 +97,7 @@ pub(super) fn update_mode_cache(mode: &MacroblockMode, top: &mut [u8], left: &mu
     }
 }
 
+/// Internal helper for coeff probs.
 pub(super) fn coeff_probs<'a>(
     probabilities: &'a CoeffProbTables,
     coeff_type: usize,
@@ -97,6 +107,7 @@ pub(super) fn coeff_probs<'a>(
     &probabilities[coeff_type][BANDS[coeff_index]][ctx]
 }
 
+/// Internal helper for last non zero.
 pub(super) fn last_non_zero(levels: &[i16; 16], first: usize) -> isize {
     for scan in (first..16).rev() {
         if levels[ZIGZAG[scan]] != 0 {
@@ -106,6 +117,7 @@ pub(super) fn last_non_zero(levels: &[i16; 16], first: usize) -> isize {
     first as isize - 1
 }
 
+/// Writes large value.
 pub(super) fn write_large_value(writer: &mut Vp8BoolWriter, value: u32, probs: &[u8; 11]) {
     if !writer.put_bit(value > 4, probs[3]) {
         if writer.put_bit(value != 2, probs[4]) {
@@ -152,6 +164,7 @@ pub(super) fn write_large_value(writer: &mut Vp8BoolWriter, value: u32, probs: &
     }
 }
 
+/// Internal helper for large value rate.
 pub(super) fn large_value_rate(value: u32, probs: &[u8; 11]) -> u32 {
     let mut rate = 0;
     if value <= 4 {
@@ -219,6 +232,7 @@ pub(super) fn large_value_rate(value: u32, probs: &[u8; 11]) -> u32 {
     rate
 }
 
+/// Internal helper for coefficients rate.
 pub(super) fn coefficients_rate(
     probabilities: &CoeffProbTables,
     coeff_type: usize,
@@ -269,6 +283,7 @@ pub(super) fn coefficients_rate(
     rate
 }
 
+/// Encodes coefficients.
 pub(super) fn encode_coefficients(
     writer: &mut Vp8BoolWriter,
     probabilities: &CoeffProbTables,
@@ -316,6 +331,7 @@ pub(super) fn encode_coefficients(
     true
 }
 
+/// Records stat.
 pub(super) fn record_stat(bit: bool, stat: &mut u32) {
     if *stat >= 0xfffe0000 {
         *stat = ((*stat + 1) >> 1) & 0x7fff7fff;
@@ -323,6 +339,7 @@ pub(super) fn record_stat(bit: bool, stat: &mut u32) {
     *stat += 0x00010000 + bit as u32;
 }
 
+/// Records large value.
 pub(super) fn record_large_value(stats: &mut [u32; NUM_PROBAS], value: u32) {
     let gt4 = value > 4;
     record_stat(gt4, &mut stats[3]);
@@ -357,6 +374,7 @@ pub(super) fn record_large_value(stats: &mut [u32; NUM_PROBAS], value: u32) {
     }
 }
 
+/// Records coefficients stats.
 pub(super) fn record_coefficients_stats(
     stats: &mut CoeffStats,
     coeff_type: usize,
@@ -410,6 +428,7 @@ pub(super) fn record_coefficients_stats(
     true
 }
 
+/// Returns the bit cost of a boolean decision at the given probability.
 pub(super) fn bit_cost(bit: bool, prob: u8) -> u32 {
     let p = if bit {
         255u16.saturating_sub(prob as u16)
@@ -420,6 +439,7 @@ pub(super) fn bit_cost(bit: bool, prob: u8) -> u32 {
     ((-p.log2()) * 256.0 + 0.5) as u32
 }
 
+/// Calculates token probability.
 pub(super) fn calc_token_probability(nb: u32, total: u32) -> u8 {
     if nb == 0 {
         255
@@ -428,10 +448,12 @@ pub(super) fn calc_token_probability(nb: u32, total: u32) -> u8 {
     }
 }
 
+/// Returns the modeled cost of one probability branch.
 pub(super) fn branch_cost(nb: u32, total: u32, prob: u8) -> u32 {
     nb * bit_cost(true, prob) + (total - nb) * bit_cost(false, prob)
 }
 
+/// Finalizes token probabilities.
 pub(super) fn finalize_token_probabilities(stats: &CoeffStats) -> CoeffProbTables {
     let mut probabilities = COEFFS_PROBA0;
     for t in 0..NUM_TYPES {
@@ -459,6 +481,7 @@ pub(super) fn finalize_token_probabilities(stats: &CoeffStats) -> CoeffProbTable
     probabilities
 }
 
+/// Encodes partition0.
 pub(super) fn encode_partition0(
     mb_width: usize,
     mb_height: usize,
@@ -604,6 +627,7 @@ pub(super) fn encode_partition0(
     writer.finish()
 }
 
+/// Encodes macroblock.
 pub(super) fn encode_macroblock(
     writer: &mut Vp8BoolWriter,
     probabilities: &CoeffProbTables,
@@ -1033,6 +1057,7 @@ pub(super) fn encode_macroblock(
     false
 }
 
+/// Encodes token partition.
 pub(super) fn encode_token_partition(
     source: &Planes,
     mb_width: usize,

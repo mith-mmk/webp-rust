@@ -1,6 +1,9 @@
+//! Backward references, cache selection, and tokenization for lossless encoding.
+
 use super::entropy::*;
 use super::*;
 
+/// Finds match length.
 pub(super) fn find_match_length(
     argb: &[u32],
     first: usize,
@@ -14,6 +17,7 @@ pub(super) fn find_match_length(
     len
 }
 
+/// Internal helper for token build options.
 pub(super) fn token_build_options(
     match_search_level: u8,
     color_cache_bits: usize,
@@ -46,6 +50,7 @@ pub(super) fn token_build_options(
     }
 }
 
+/// Returns the maximum color cache bits for profile.
 pub(super) fn max_color_cache_bits_for_profile(profile: &LosslessSearchProfile) -> usize {
     if !profile.use_color_cache {
         return 0;
@@ -60,6 +65,7 @@ pub(super) fn max_color_cache_bits_for_profile(profile: &LosslessSearchProfile) 
     }
 }
 
+/// Builds a shortlist of color cache candidates for profile.
 pub(super) fn shortlist_color_cache_candidates_for_profile(
     profile: &LosslessSearchProfile,
 ) -> usize {
@@ -70,6 +76,7 @@ pub(super) fn shortlist_color_cache_candidates_for_profile(
     }
 }
 
+/// Internal helper for meta huffman candidates.
 pub(super) fn meta_huffman_candidates(
     entropy_search_level: u8,
     width: usize,
@@ -128,6 +135,7 @@ pub(super) fn meta_huffman_candidates(
     }
 }
 
+/// Internal helper for suggested max color cache bits.
 pub(super) fn suggested_max_color_cache_bits(argb: &[u32], max_cache_bits: usize) -> usize {
     if max_cache_bits == 0 {
         return 0;
@@ -154,6 +162,7 @@ pub(super) fn suggested_max_color_cache_bits(argb: &[u32], max_cache_bits: usize
     bits.min(max_cache_bits)
 }
 
+/// Builds window offsets.
 pub(super) fn build_window_offsets(width: usize, max_plane_codes: usize) -> Vec<usize> {
     if max_plane_codes == 0 {
         return Vec::new();
@@ -183,6 +192,7 @@ pub(super) fn build_window_offsets(width: usize, max_plane_codes: usize) -> Vec<
         .collect()
 }
 
+/// Returns the minimum match length for distance.
 pub(super) fn min_match_length_for_distance(width: usize, distance: usize) -> usize {
     if distance == 1 || distance == width {
         return MIN_LENGTH;
@@ -199,6 +209,7 @@ pub(super) fn min_match_length_for_distance(width: usize, distance: usize) -> us
     }
 }
 
+/// Internal helper for prefix extra bit count.
 pub(super) fn prefix_extra_bit_count(value: usize) -> usize {
     if value <= 4 {
         0
@@ -209,6 +220,7 @@ pub(super) fn prefix_extra_bit_count(value: usize) -> usize {
     }
 }
 
+/// Copies cost bits.
 pub(super) fn copy_cost_bits(width: usize, distance: usize, length: usize) -> isize {
     let plane_code = distance_to_plane_code(width, distance);
     APPROX_COPY_LENGTH_SYMBOL_BITS
@@ -217,10 +229,12 @@ pub(super) fn copy_cost_bits(width: usize, distance: usize, length: usize) -> is
         + prefix_extra_bit_count(plane_code) as isize
 }
 
+/// Internal helper for match gain bits.
 pub(super) fn match_gain_bits(width: usize, distance: usize, length: usize) -> isize {
     APPROX_LITERAL_COST_BITS * length as isize - copy_cost_bits(width, distance, length)
 }
 
+/// Internal helper for consider match.
 pub(super) fn consider_match(
     width: usize,
     best_match: &mut Option<(usize, usize)>,
@@ -246,6 +260,7 @@ pub(super) fn consider_match(
     }
 }
 
+/// Internal helper for preview update match chain.
 pub(super) fn preview_update_match_chain(
     argb: &[u32],
     index: usize,
@@ -262,6 +277,7 @@ pub(super) fn preview_update_match_chain(
     Some((hash, old_prev, old_head))
 }
 
+/// Restores previewed match chain.
 pub(super) fn restore_previewed_match_chain(
     index: usize,
     preview: Option<(usize, usize, usize)>,
@@ -274,6 +290,7 @@ pub(super) fn restore_previewed_match_chain(
     }
 }
 
+/// Internal helper for hash match pixels.
 pub(super) fn hash_match_pixels(argb: &[u32], index: usize) -> usize {
     let a = argb[index];
     let b = argb[index + 1].rotate_left(7);
@@ -283,6 +300,7 @@ pub(super) fn hash_match_pixels(argb: &[u32], index: usize) -> usize {
     ((hash.wrapping_mul(COLOR_CACHE_HASH_MUL)) >> (32 - MATCH_HASH_BITS)) as usize
 }
 
+/// Updates match chain.
 pub(super) fn update_match_chain(
     argb: &[u32],
     index: usize,
@@ -297,6 +315,7 @@ pub(super) fn update_match_chain(
     heads[hash] = index;
 }
 
+/// Finds best hash match.
 pub(super) fn find_best_hash_match(
     width: usize,
     argb: &[u32],
@@ -336,6 +355,7 @@ pub(super) fn find_best_hash_match(
     best
 }
 
+/// Finds best window offset match.
 pub(super) fn find_best_window_offset_match(
     width: usize,
     argb: &[u32],
@@ -355,6 +375,7 @@ pub(super) fn find_best_window_offset_match(
     best_match
 }
 
+/// Returns the approximate bit cost of emitting a single pixel.
 pub(super) fn single_pixel_cost_bits(cache_hit: bool) -> isize {
     if cache_hit {
         APPROX_CACHE_COST_BITS
@@ -363,6 +384,7 @@ pub(super) fn single_pixel_cost_bits(cache_hit: bool) -> isize {
     }
 }
 
+/// Finds best match.
 pub(super) fn find_best_match(
     width: usize,
     argb: &[u32],
@@ -405,6 +427,7 @@ pub(super) fn find_best_match(
     best_match
 }
 
+/// Builds tokens greedy.
 pub(super) fn build_tokens_greedy(
     width: usize,
     argb: &[u32],
@@ -503,6 +526,7 @@ pub(super) fn build_tokens_greedy(
     Ok(tokens)
 }
 
+/// Builds traceback cost model.
 pub(super) fn build_traceback_cost_model(
     width: usize,
     tokens: &[Token],
@@ -581,6 +605,7 @@ impl TracebackCostModel {
     }
 }
 
+/// Internal helper for push match candidate.
 pub(super) fn push_match_candidate(
     width: usize,
     candidates: &mut Vec<(usize, usize)>,
@@ -600,6 +625,7 @@ pub(super) fn push_match_candidate(
     candidates.push((distance, length));
 }
 
+/// Collects match candidates.
 pub(super) fn collect_match_candidates(
     width: usize,
     argb: &[u32],
@@ -662,6 +688,7 @@ pub(super) fn collect_match_candidates(
     candidates
 }
 
+/// Builds cache keys.
 pub(super) fn build_cache_keys(
     argb: &[u32],
     color_cache_bits: usize,
@@ -679,6 +706,7 @@ pub(super) fn build_cache_keys(
     Ok(keys)
 }
 
+/// Builds tokens with traceback.
 pub(super) fn build_tokens_with_traceback(
     width: usize,
     argb: &[u32],
@@ -814,6 +842,7 @@ pub(super) fn build_tokens_with_traceback(
     Ok(tokens)
 }
 
+/// Builds tokens.
 pub(super) fn build_tokens(
     width: usize,
     argb: &[u32],

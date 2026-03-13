@@ -1,3 +1,5 @@
+//! Public entry points for lossless still-image WebP encoding.
+
 use super::plans::*;
 use super::*;
 

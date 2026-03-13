@@ -1,8 +1,11 @@
+//! Transform planning and candidate selection for lossless encoding.
+
 use super::entropy::*;
 use super::tokens::*;
 use super::*;
 use crate::encoder::writer::ByteWriter;
 
+/// Applies subtract green transform.
 pub(super) fn apply_subtract_green_transform(argb: &[u32]) -> Vec<u32> {
     argb.iter()
         .map(|&pixel| {
@@ -17,10 +20,12 @@ pub(super) fn apply_subtract_green_transform(argb: &[u32]) -> Vec<u32> {
         .collect()
 }
 
+/// Internal helper for color transform delta.
 pub(super) fn color_transform_delta(transform: i8, color: u8) -> i32 {
     ((transform as i32) * (color as i8 as i32)) >> 5
 }
 
+/// Estimates transform coefficient.
 pub(super) fn estimate_transform_coefficient(pairs: &[(i32, i32)]) -> i8 {
     let mut numerator = 0i64;
     let mut denominator = 0i64;
@@ -35,6 +40,7 @@ pub(super) fn estimate_transform_coefficient(pairs: &[(i32, i32)]) -> i8 {
     coefficient.clamp(-128, 127) as i8
 }
 
+/// Estimates cross color transform region.
 pub(super) fn estimate_cross_color_transform_region(
     width: usize,
     height: usize,
@@ -86,6 +92,7 @@ pub(super) fn estimate_cross_color_transform_region(
     }
 }
 
+/// Estimates cross color transform.
 pub(super) fn estimate_cross_color_transform(argb: &[u32]) -> CrossColorTransform {
     let mut red_pairs = Vec::with_capacity(argb.len());
     let mut blue_green_pairs = Vec::with_capacity(argb.len());
@@ -118,12 +125,14 @@ pub(super) fn estimate_cross_color_transform(argb: &[u32]) -> CrossColorTransfor
     }
 }
 
+/// Internal helper for pack cross color transform.
 pub(super) fn pack_cross_color_transform(transform: CrossColorTransform) -> u32 {
     ((transform.red_to_blue as u8 as u32) << 16)
         | ((transform.green_to_blue as u8 as u32) << 8)
         | (transform.green_to_red as u8 as u32)
 }
 
+/// Applies cross color transform.
 pub(super) fn apply_cross_color_transform(
     width: usize,
     height: usize,
@@ -158,10 +167,12 @@ pub(super) fn apply_cross_color_transform(
     output
 }
 
+/// Internal helper for average2.
 pub(super) fn average2(a: u32, b: u32) -> u32 {
     (((a ^ b) & 0xfefe_fefeu32) >> 1) + (a & b)
 }
 
+/// Selects predictor.
 pub(super) fn select_predictor(left: u32, top: u32, top_left: u32) -> u32 {
     let pred_alpha = ((left >> 24) as i32) + ((top >> 24) as i32) - ((top_left >> 24) as i32);
     let pred_red = ((left >> 16) & 0xff) as i32 + ((top >> 16) & 0xff) as i32
@@ -186,10 +197,12 @@ pub(super) fn select_predictor(left: u32, top: u32, top_left: u32) -> u32 {
     }
 }
 
+/// Internal helper for clip255.
 pub(super) fn clip255(value: i32) -> u32 {
     value.clamp(0, 255) as u32
 }
 
+/// Internal helper for clamped add subtract full.
 pub(super) fn clamped_add_subtract_full(left: u32, top: u32, top_left: u32) -> u32 {
     let alpha = clip255((left >> 24) as i32 + (top >> 24) as i32 - (top_left >> 24) as i32);
     let red = clip255(
@@ -203,6 +216,7 @@ pub(super) fn clamped_add_subtract_full(left: u32, top: u32, top_left: u32) -> u
     (alpha << 24) | (red << 16) | (green << 8) | blue
 }
 
+/// Internal helper for clamped add subtract half.
 pub(super) fn clamped_add_subtract_half(left: u32, top: u32, top_left: u32) -> u32 {
     let avg = average2(left, top);
     let alpha = clip255((avg >> 24) as i32 + ((avg >> 24) as i32 - (top_left >> 24) as i32) / 2);
@@ -218,6 +232,7 @@ pub(super) fn clamped_add_subtract_half(left: u32, top: u32, top_left: u32) -> u
     (alpha << 24) | (red << 16) | (green << 8) | blue
 }
 
+/// Internal helper for predictor.
 pub(super) fn predictor(mode: u8, left: u32, top: u32, top_left: u32, top_right: u32) -> u32 {
     match mode {
         0 => 0xff00_0000,
@@ -238,6 +253,7 @@ pub(super) fn predictor(mode: u8, left: u32, top: u32, top_left: u32, top_right:
     }
 }
 
+/// Internal helper for predictor for mode.
 pub(super) fn predictor_for_mode(argb: &[u32], width: usize, x: usize, y: usize, mode: u8) -> u32 {
     if y == 0 {
         if x == 0 {
@@ -260,6 +276,7 @@ pub(super) fn predictor_for_mode(argb: &[u32], width: usize, x: usize, y: usize,
     }
 }
 
+/// Internal helper for sub pixels.
 pub(super) fn sub_pixels(a: u32, b: u32) -> u32 {
     let alpha = (((a >> 24) as u8).wrapping_sub((b >> 24) as u8)) as u32;
     let red = ((((a >> 16) & 0xff) as u8).wrapping_sub(((b >> 16) & 0xff) as u8)) as u32;
@@ -268,6 +285,7 @@ pub(super) fn sub_pixels(a: u32, b: u32) -> u32 {
     (alpha << 24) | (red << 16) | (green << 8) | blue
 }
 
+/// Internal helper for wrapped channel error.
 pub(super) fn wrapped_channel_error(actual: u32, predicted: u32, shift: u32) -> u32 {
     let actual = ((actual >> shift) & 0xff) as i32;
     let predicted = ((predicted >> shift) & 0xff) as i32;
@@ -275,6 +293,7 @@ pub(super) fn wrapped_channel_error(actual: u32, predicted: u32, shift: u32) -> 
     delta.min(256 - delta)
 }
 
+/// Internal helper for predictor error.
 pub(super) fn predictor_error(actual: u32, predicted: u32) -> u32 {
     wrapped_channel_error(actual, predicted, 24)
         + wrapped_channel_error(actual, predicted, 16)
@@ -282,6 +301,7 @@ pub(super) fn predictor_error(actual: u32, predicted: u32) -> u32 {
         + wrapped_channel_error(actual, predicted, 0)
 }
 
+/// Chooses predictor mode.
 pub(super) fn choose_predictor_mode(
     width: usize,
     height: usize,
@@ -313,6 +333,7 @@ pub(super) fn choose_predictor_mode(
     best_mode
 }
 
+/// Applies predictor transform.
 pub(super) fn apply_predictor_transform(
     width: usize,
     height: usize,
@@ -333,10 +354,12 @@ pub(super) fn apply_predictor_transform(
     residuals
 }
 
+/// Returns the subsampled size for a transform image dimension.
 pub(super) fn subsample_size(size: usize, bits: usize) -> usize {
     (size + (1usize << bits) - 1) >> bits
 }
 
+/// Internal helper for make predictor transform image.
 pub(super) fn make_predictor_transform_image(
     width: usize,
     height: usize,
@@ -363,6 +386,7 @@ pub(super) fn make_predictor_transform_image(
     (xsize, ysize, modes, image)
 }
 
+/// Internal helper for make uniform predictor transform image.
 pub(super) fn make_uniform_predictor_transform_image(
     width: usize,
     height: usize,
@@ -380,6 +404,7 @@ pub(super) fn make_uniform_predictor_transform_image(
     )
 }
 
+/// Internal helper for make cross color transform image.
 pub(super) fn make_cross_color_transform_image(
     width: usize,
     height: usize,
@@ -406,6 +431,7 @@ pub(super) fn make_cross_color_transform_image(
     (xsize, ysize, transforms, image)
 }
 
+/// Internal helper for make uniform cross color transform image.
 pub(super) fn make_uniform_cross_color_transform_image(
     width: usize,
     height: usize,
@@ -423,6 +449,7 @@ pub(super) fn make_uniform_cross_color_transform_image(
     )
 }
 
+/// Returns the packing shift used for a given palette size.
 pub(super) fn palette_xbits(palette_size: usize) -> usize {
     if palette_size <= 2 {
         3
@@ -435,6 +462,7 @@ pub(super) fn palette_xbits(palette_size: usize) -> usize {
     }
 }
 
+/// Collects palette.
 pub(super) fn collect_palette(argb: &[u32]) -> Option<Vec<u32>> {
     let mut unique = HashSet::with_capacity(256);
     for &pixel in argb {
@@ -448,6 +476,7 @@ pub(super) fn collect_palette(argb: &[u32]) -> Option<Vec<u32>> {
     Some(palette)
 }
 
+/// Builds palette candidate.
 pub(super) fn build_palette_candidate(
     width: usize,
     height: usize,
@@ -492,6 +521,7 @@ pub(super) fn build_palette_candidate(
     }))
 }
 
+/// Builds global cross plan.
 pub(super) fn build_global_cross_plan(
     width: usize,
     height: usize,
@@ -526,6 +556,7 @@ pub(super) fn build_global_cross_plan(
     }
 }
 
+/// Builds raw plan.
 pub(super) fn build_raw_plan(argb: &[u32]) -> TransformPlan {
     TransformPlan {
         use_subtract_green: false,
@@ -539,6 +570,7 @@ pub(super) fn build_raw_plan(argb: &[u32]) -> TransformPlan {
     }
 }
 
+/// Builds subtract green plan.
 pub(super) fn build_subtract_green_plan(subtract_green: &[u32]) -> TransformPlan {
     TransformPlan {
         use_subtract_green: true,
@@ -552,6 +584,7 @@ pub(super) fn build_subtract_green_plan(subtract_green: &[u32]) -> TransformPlan
     }
 }
 
+/// Builds global predictor plan.
 pub(super) fn build_global_predictor_plan(
     width: usize,
     height: usize,
@@ -585,6 +618,7 @@ pub(super) fn build_global_predictor_plan(
     }
 }
 
+/// Builds global transform plan.
 pub(super) fn build_global_transform_plan(
     width: usize,
     height: usize,
@@ -620,6 +654,7 @@ pub(super) fn build_global_transform_plan(
     }
 }
 
+/// Builds tiled cross plan.
 pub(super) fn build_tiled_cross_plan(
     width: usize,
     height: usize,
@@ -648,6 +683,7 @@ pub(super) fn build_tiled_cross_plan(
     }
 }
 
+/// Builds tiled predictor plan.
 pub(super) fn build_tiled_predictor_plan(
     width: usize,
     height: usize,
@@ -676,6 +712,7 @@ pub(super) fn build_tiled_predictor_plan(
     }
 }
 
+/// Builds tiled transform plan.
 pub(super) fn build_tiled_transform_plan(
     width: usize,
     height: usize,
@@ -706,10 +743,12 @@ pub(super) fn build_tiled_transform_plan(
     }
 }
 
+/// Internal helper for quick token build options.
 pub(super) fn quick_token_build_options(profile: &LosslessSearchProfile) -> TokenBuildOptions {
     token_build_options(profile.match_search_level.min(2), 0)
 }
 
+/// Estimates token stream cost bytes.
 pub(super) fn estimate_token_stream_cost_bytes(
     width: usize,
     argb: &[u32],
@@ -732,6 +771,7 @@ pub(super) fn estimate_token_stream_cost_bytes(
     Ok(total_bits.div_ceil(8))
 }
 
+/// Estimates transform plan score.
 pub(super) fn estimate_transform_plan_score(
     width: usize,
     plan: &TransformPlan,
@@ -771,6 +811,7 @@ pub(super) fn estimate_transform_plan_score(
     Ok(score)
 }
 
+/// Collects transform plans.
 pub(super) fn collect_transform_plans(
     width: usize,
     height: usize,
@@ -836,6 +877,7 @@ pub(super) fn collect_transform_plans(
     plans
 }
 
+/// Builds a shortlist of transform plans.
 pub(super) fn shortlist_transform_plans(
     width: usize,
     plans: Vec<TransformPlan>,
@@ -850,6 +892,7 @@ pub(super) fn shortlist_transform_plans(
     Ok(ranked)
 }
 
+/// Returns whether stop transform search.
 pub(super) fn should_stop_transform_search(
     best_len: usize,
     next_estimate: usize,
@@ -860,6 +903,7 @@ pub(super) fn should_stop_transform_search(
             >= best_len.saturating_mul(profile.early_stop_ratio_percent)
 }
 
+/// Encodes transform plan to vp8l.
 pub(super) fn encode_transform_plan_to_vp8l(
     width: usize,
     height: usize,
@@ -895,6 +939,7 @@ pub(super) fn encode_transform_plan_to_vp8l(
     Ok(best)
 }
 
+/// Encodes transform plan to vp8l with cache.
 pub(super) fn encode_transform_plan_to_vp8l_with_cache(
     width: usize,
     height: usize,
@@ -965,6 +1010,7 @@ pub(super) fn encode_transform_plan_to_vp8l_with_cache(
     Ok(vp8l.into_bytes())
 }
 
+/// Encodes palette candidate to vp8l.
 pub(super) fn encode_palette_candidate_to_vp8l(
     width: usize,
     height: usize,

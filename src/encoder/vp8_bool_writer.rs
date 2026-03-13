@@ -1,3 +1,5 @@
+//! Boolean arithmetic writer used by the lossy `VP8` encoder.
+
 use bin_rs::io::write_byte;
 
 #[derive(Debug, Clone)]
@@ -10,6 +12,7 @@ pub(crate) struct Vp8BoolWriter {
 }
 
 impl Vp8BoolWriter {
+    /// Creates a new boolean arithmetic writer with a reserved output size.
     pub(crate) fn new(expected_size: usize) -> Self {
         Self {
             range: 255 - 1,
@@ -20,6 +23,7 @@ impl Vp8BoolWriter {
         }
     }
 
+    /// Flushes completed bytes from the arithmetic coder state.
     fn flush(&mut self) {
         let shift = 8 + self.nb_bits;
         let bits = self.value >> shift;
@@ -43,6 +47,7 @@ impl Vp8BoolWriter {
         }
     }
 
+    /// Encodes one probability-weighted bit.
     pub(crate) fn put_bit(&mut self, bit: bool, prob: u8) -> bool {
         let split = (self.range * prob as i32) >> 8;
         if bit {
@@ -63,6 +68,7 @@ impl Vp8BoolWriter {
         bit
     }
 
+    /// Encodes one unbiased bit.
     pub(crate) fn put_bit_uniform(&mut self, bit: bool) -> bool {
         let split = self.range >> 1;
         if bit {
@@ -82,12 +88,14 @@ impl Vp8BoolWriter {
         bit
     }
 
+    /// Encodes a fixed-width unsigned value in MSB-first order.
     pub(crate) fn put_bits(&mut self, value: u32, num_bits: usize) {
         for shift in (0..num_bits).rev() {
             self.put_bit_uniform(((value >> shift) & 1) != 0);
         }
     }
 
+    /// Encodes a signed magnitude value using the VP8 boolean coding layout.
     pub(crate) fn put_signed_bits(&mut self, value: i32, num_bits: usize) {
         if !self.put_bit_uniform(value != 0) {
             return;
@@ -99,6 +107,7 @@ impl Vp8BoolWriter {
         }
     }
 
+    /// Flushes the remaining coder state and returns the final byte stream.
     pub(crate) fn finish(mut self) -> Vec<u8> {
         self.put_bits(0, (9 - self.nb_bits) as usize);
         self.nb_bits = 0;
@@ -113,6 +122,7 @@ mod tests {
     use crate::decoder::vp8::Vp8BoolDecoder;
 
     #[test]
+    /// Verifies that the encoder round-trips against the decoder.
     fn round_trips_boolean_stream() {
         let mut writer = Vp8BoolWriter::new(128);
         let mut expected = Vec::new();

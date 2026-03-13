@@ -1,8 +1,11 @@
+//! Public entry points and final frame assembly for lossy encoding.
+
 use super::bitstream::*;
 use super::predict::*;
 use super::*;
 use crate::encoder::writer::ByteWriter;
 
+/// Builds a raw VP8 frame from the already encoded partitions.
 fn build_vp8_frame(
     width: usize,
     height: usize,
@@ -29,6 +32,7 @@ fn build_vp8_frame(
     Ok(data.into_bytes())
 }
 
+/// Builds a VP8 frame for a candidate mode/filter combination.
 fn build_candidate_vp8_frame(
     width: usize,
     height: usize,
@@ -50,6 +54,7 @@ fn build_candidate_vp8_frame(
     build_vp8_frame(width, height, &partition0, &candidate.token_partition)
 }
 
+/// Encodes one lossy candidate and captures its token partition, probabilities, and modes.
 fn encode_lossy_candidate(
     source: &Planes,
     mb_width: usize,
@@ -108,6 +113,7 @@ fn encode_lossy_candidate(
     })
 }
 
+/// Finalizes the lossy candidate by choosing the best filter configuration.
 fn finalize_lossy_candidate(
     width: usize,
     height: usize,

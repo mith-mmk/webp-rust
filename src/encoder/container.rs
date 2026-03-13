@@ -1,9 +1,12 @@
+//! RIFF/WebP container assembly helpers for still images.
+
 use crate::decoder::vp8i::ALPHA_FLAG;
 use crate::encoder::writer::ByteWriter;
 use crate::encoder::EncoderError;
 
 const EXIF_FLAG: u32 = 0x0000_0008;
 
+/// Metadata and payload for a still-image WebP chunk.
 pub(crate) struct StillImageChunk<'a> {
     pub fourcc: [u8; 4],
     pub payload: &'a [u8],
@@ -12,11 +15,13 @@ pub(crate) struct StillImageChunk<'a> {
     pub has_alpha: bool,
 }
 
+/// Internal helper for padded len.
 fn padded_len(size: usize) -> Result<usize, EncoderError> {
     size.checked_add(size & 1)
         .ok_or(EncoderError::InvalidParam("encoded output is too large"))
 }
 
+/// Internal helper for append chunk.
 fn append_chunk(
     data: &mut ByteWriter,
     fourcc: &[u8; 4],
@@ -33,6 +38,7 @@ fn append_chunk(
     Ok(())
 }
 
+/// Internal helper for extend riff.
 fn extend_riff(body: ByteWriter) -> Result<Vec<u8>, EncoderError> {
     let body = body.into_bytes();
     let riff_size = u32::try_from(body.len())
@@ -44,6 +50,7 @@ fn extend_riff(body: ByteWriter) -> Result<Vec<u8>, EncoderError> {
     Ok(data.into_bytes())
 }
 
+/// Encodes le24.
 fn encode_le24(value: usize) -> Result<[u8; 3], EncoderError> {
     let encoded = value.checked_sub(1).ok_or(EncoderError::InvalidParam(
         "image dimensions must be non-zero",
@@ -60,6 +67,7 @@ fn encode_le24(value: usize) -> Result<[u8; 3], EncoderError> {
     ])
 }
 
+/// Wraps an encoded still-image payload in a RIFF/WebP container.
 pub(crate) fn wrap_still_webp(
     image: StillImageChunk<'_>,
     exif: Option<&[u8]>,

@@ -1,7 +1,10 @@
+//! Huffman coding and image-stream emission for lossless encoding.
+
 use super::plans::*;
 use super::tokens::*;
 use super::*;
 
+/// Internal helper for prefix encode.
 pub(super) fn prefix_encode(value: usize) -> Result<PrefixCode, EncoderError> {
     if value == 0 {
         return Err(EncoderError::InvalidParam("prefix value must be non-zero"));
@@ -28,6 +31,7 @@ pub(super) fn prefix_encode(value: usize) -> Result<PrefixCode, EncoderError> {
     })
 }
 
+/// Internal helper for distance to plane code.
 pub(super) fn distance_to_plane_code(width: usize, distance: usize) -> usize {
     let yoffset = distance / width;
     let xoffset = distance - yoffset * width;
@@ -41,6 +45,7 @@ pub(super) fn distance_to_plane_code(width: usize, distance: usize) -> usize {
     }
 }
 
+/// Writes simple huffman tree.
 pub(super) fn write_simple_huffman_tree(
     bw: &mut BitWriter,
     symbols: &[usize],
@@ -78,6 +83,7 @@ pub(super) fn write_simple_huffman_tree(
     Ok(())
 }
 
+/// Writes trimmed length.
 pub(super) fn write_trimmed_length(
     bw: &mut BitWriter,
     trimmed_length: usize,
@@ -99,6 +105,7 @@ pub(super) fn write_trimmed_length(
     bw.put_bits((trimmed_length - 2) as u32, nbitpairs * 2)
 }
 
+/// Writes huffman tree.
 pub(super) fn write_huffman_tree(
     bw: &mut BitWriter,
     code: &HuffmanCode,
@@ -173,6 +180,7 @@ pub(super) fn write_huffman_tree(
     Ok(())
 }
 
+/// Builds histograms.
 pub(super) fn build_histograms(
     tokens: &[Token],
     width: usize,
@@ -186,6 +194,7 @@ pub(super) fn build_histograms(
     Ok(histograms)
 }
 
+/// Internal helper for new histograms.
 pub(super) fn new_histograms(color_cache_bits: usize) -> HistogramSet {
     [
         vec![
@@ -205,6 +214,7 @@ pub(super) fn new_histograms(color_cache_bits: usize) -> HistogramSet {
     ]
 }
 
+/// Internal helper for add token to histograms.
 pub(super) fn add_token_to_histograms(
     histograms: &mut HistogramSet,
     width: usize,
@@ -232,6 +242,7 @@ pub(super) fn add_token_to_histograms(
     Ok(())
 }
 
+/// Internal helper for normalize histograms.
 pub(super) fn normalize_histograms(histograms: &mut HistogramSet) {
     for histogram in histograms.iter_mut().take(4) {
         if histogram.iter().all(|&count| count == 0) {
@@ -243,6 +254,7 @@ pub(super) fn normalize_histograms(histograms: &mut HistogramSet) {
     }
 }
 
+/// Internal helper for merge histograms.
 pub(super) fn merge_histograms(dst: &mut HistogramSet, src: &HistogramSet) {
     for (dst_histogram, src_histogram) in dst.iter_mut().zip(src.iter()) {
         for (dst_count, src_count) in dst_histogram.iter_mut().zip(src_histogram.iter()) {
@@ -251,6 +263,7 @@ pub(super) fn merge_histograms(dst: &mut HistogramSet, src: &HistogramSet) {
     }
 }
 
+/// Builds group codes.
 pub(super) fn build_group_codes(
     histograms: &HistogramSet,
 ) -> Result<HuffmanGroupCodes, EncoderError> {
@@ -263,6 +276,7 @@ pub(super) fn build_group_codes(
     })
 }
 
+/// Returns the number of pixels consumed by a lossless token.
 pub(super) fn token_len(token: Token) -> usize {
     match token {
         Token::Copy { length, .. } => length,
@@ -270,6 +284,7 @@ pub(super) fn token_len(token: Token) -> usize {
     }
 }
 
+/// Maps a token position to its histogram tile index.
 pub(super) fn tile_index_for_pos(
     width: usize,
     huffman_bits: usize,
@@ -281,6 +296,7 @@ pub(super) fn tile_index_for_pos(
     (y >> huffman_bits) * huffman_xsize + (x >> huffman_bits)
 }
 
+/// Internal helper for histogram cost.
 pub(super) fn histogram_cost(histograms: &HistogramSet, codes: &HuffmanGroupCodes) -> usize {
     histograms[0]
         .iter()
@@ -309,6 +325,7 @@ pub(super) fn histogram_cost(histograms: &HistogramSet, codes: &HuffmanGroupCode
             .sum::<usize>()
 }
 
+/// Internal helper for histogram entropy cost.
 pub(super) fn histogram_entropy_cost(histogram: &[u32]) -> f64 {
     let total = histogram.iter().map(|&count| count as f64).sum::<f64>();
     if total == 0.0 {
@@ -325,6 +342,7 @@ pub(super) fn histogram_entropy_cost(histogram: &[u32]) -> f64 {
         .sum()
 }
 
+/// Internal helper for histogram signature costs.
 pub(super) fn histogram_signature_costs(histograms: &HistogramSet) -> [f64; 3] {
     [
         histogram_entropy_cost(&histograms[0]),
@@ -333,6 +351,7 @@ pub(super) fn histogram_signature_costs(histograms: &HistogramSet) -> [f64; 3] {
     ]
 }
 
+/// Internal helper for histogram set entropy cost.
 pub(super) fn histogram_set_entropy_cost(histograms: &HistogramSet) -> f64 {
     histograms
         .iter()
@@ -340,6 +359,7 @@ pub(super) fn histogram_set_entropy_cost(histograms: &HistogramSet) -> f64 {
         .sum()
 }
 
+/// Internal helper for histogram merge penalty.
 pub(super) fn histogram_merge_penalty(lhs: &HistogramSet, rhs: &HistogramSet) -> f64 {
     let mut merged = lhs.clone();
     merge_histograms(&mut merged, rhs);
@@ -348,6 +368,7 @@ pub(super) fn histogram_merge_penalty(lhs: &HistogramSet, rhs: &HistogramSet) ->
         - histogram_set_entropy_cost(rhs)
 }
 
+/// Internal helper for histogram partition index.
 pub(super) fn histogram_partition_index(
     value: f64,
     min_value: f64,
@@ -363,6 +384,7 @@ pub(super) fn histogram_partition_index(
     index.min(partitions - 1)
 }
 
+/// Internal helper for entropy histogram candidates.
 pub(super) fn entropy_histogram_candidates(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -466,6 +488,7 @@ pub(super) fn entropy_histogram_candidates(
     candidates
 }
 
+/// Builds entropy seed histograms.
 pub(super) fn build_entropy_seed_histograms(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -481,6 +504,7 @@ pub(super) fn build_entropy_seed_histograms(
         .collect()
 }
 
+/// Builds weighted seed histograms.
 pub(super) fn build_weighted_seed_histograms(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -497,6 +521,7 @@ pub(super) fn build_weighted_seed_histograms(
         .collect()
 }
 
+/// Internal helper for assign tiles to groups.
 pub(super) fn assign_tiles_to_groups(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -517,6 +542,7 @@ pub(super) fn assign_tiles_to_groups(
     }
 }
 
+/// Internal helper for refine meta huffman plan.
 pub(super) fn refine_meta_huffman_plan(
     tile_count: usize,
     color_cache_bits: usize,
@@ -579,6 +605,7 @@ pub(super) fn refine_meta_huffman_plan(
     }))
 }
 
+/// Internal helper for meta huffman assignment cost.
 pub(super) fn meta_huffman_assignment_cost(
     non_empty_tiles: &[(usize, usize)],
     tile_histograms: &[HistogramSet],
@@ -592,6 +619,7 @@ pub(super) fn meta_huffman_assignment_cost(
         .sum()
 }
 
+/// Applies color cache to tokens.
 pub(super) fn apply_color_cache_to_tokens(
     argb: &[u32],
     tokens: &[Token],
@@ -633,6 +661,7 @@ pub(super) fn apply_color_cache_to_tokens(
     Ok(cached_tokens)
 }
 
+/// Builds meta huffman plan.
 pub(super) fn build_meta_huffman_plan(
     width: usize,
     height: usize,
@@ -705,6 +734,7 @@ pub(super) fn build_meta_huffman_plan(
     Ok(best_plan)
 }
 
+/// Writes huffman group.
 pub(super) fn write_huffman_group(
     bw: &mut BitWriter,
     group: &HuffmanGroupCodes,
@@ -716,6 +746,7 @@ pub(super) fn write_huffman_group(
     write_huffman_tree(bw, &group.dist)
 }
 
+/// Writes tokens with meta.
 pub(super) fn write_tokens_with_meta(
     bw: &mut BitWriter,
     tokens: &[Token],
@@ -765,6 +796,7 @@ pub(super) fn write_tokens_with_meta(
     Ok(())
 }
 
+/// Writes tokens.
 pub(super) fn write_tokens(
     bw: &mut BitWriter,
     tokens: &[Token],
@@ -811,6 +843,7 @@ pub(super) fn write_tokens(
     Ok(())
 }
 
+/// Writes single group image stream.
 pub(super) fn write_single_group_image_stream(
     bw: &mut BitWriter,
     width: usize,
@@ -841,6 +874,7 @@ pub(super) fn write_single_group_image_stream(
     )
 }
 
+/// Writes meta huffman image stream.
 pub(super) fn write_meta_huffman_image_stream(
     bw: &mut BitWriter,
     width: usize,
@@ -886,6 +920,7 @@ pub(super) fn write_meta_huffman_image_stream(
     write_tokens_with_meta(bw, tokens, width, plan)
 }
 
+/// Writes image stream from tokens.
 pub(super) fn write_image_stream_from_tokens(
     bw: &mut BitWriter,
     width: usize,
@@ -946,6 +981,7 @@ pub(super) fn write_image_stream_from_tokens(
     )
 }
 
+/// Writes image stream.
 pub(super) fn write_image_stream(
     bw: &mut BitWriter,
     width: usize,
@@ -966,6 +1002,7 @@ pub(super) fn write_image_stream(
     )
 }
 
+/// Estimates single group image stream size.
 pub(super) fn estimate_single_group_image_stream_size(
     width: usize,
     tokens: &[Token],
@@ -985,6 +1022,7 @@ pub(super) fn estimate_single_group_image_stream_size(
     Ok(bw.into_bytes().len())
 }
 
+/// Estimates meta huffman image stream size.
 pub(super) fn estimate_meta_huffman_image_stream_size(
     width: usize,
     tokens: &[Token],
@@ -996,6 +1034,7 @@ pub(super) fn estimate_meta_huffman_image_stream_size(
     Ok(bw.into_bytes().len())
 }
 
+/// Estimates image stream size.
 pub(super) fn estimate_image_stream_size(
     width: usize,
     height: usize,
@@ -1017,6 +1056,7 @@ pub(super) fn estimate_image_stream_size(
     Ok(bw.into_bytes().len())
 }
 
+/// Estimates cache candidate cost.
 pub(super) fn estimate_cache_candidate_cost(
     width: usize,
     tokens: &[Token],
@@ -1027,6 +1067,7 @@ pub(super) fn estimate_cache_candidate_cost(
     Ok(histogram_cost(&histograms, &group))
 }
 
+/// Selects best color cache bits.
 pub(super) fn select_best_color_cache_bits(
     width: usize,
     height: usize,
