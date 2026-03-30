@@ -11,15 +11,21 @@
 
 use std::path::Path;
 
+pub mod compat;
 pub mod decoder;
 pub mod encoder;
 mod image;
 #[doc(hidden)]
 pub mod legacy;
 
+pub use compat::{
+    CallbackResponse, DataMap, DecodeOptions, DrawCallback, DrawOptions, ImageRect, InitOptions,
+    Metadata, NextBlend, NextDispose, NextOption, NextOptions, ResponseCommand, RGBA,
+};
 pub use decoder::DecoderError;
 pub use encoder::{EncoderError, LosslessEncodingOptions, LossyEncodingOptions};
 pub use image::ImageBuffer;
+pub use legacy::{read_header, read_u24, AnimationControl, AnimationFrame, WebpHeader};
 
 /// Top-level still-image WebP compression mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

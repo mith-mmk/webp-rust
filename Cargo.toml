@@ -1,6 +1,6 @@
 [package]
 name = "webp-rust"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Pure Rust implementation of a WebP encoder and decoder"
 keywords =  ["webp", "image", "encoder", "codec", "compression"]
@@ -9,6 +9,8 @@ license= "MIT"
 repository = "https://github.com/mith-mmk/webp-rust"
 documentation = "https://docs.rs/webp-rust"
 readme = "README.md"
+
+[workspace]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
