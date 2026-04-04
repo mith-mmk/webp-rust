@@ -1,6 +1,6 @@
 [package]
 name = "webp-rust"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Pure Rust implementation of a WebP encoder and decoder"
 keywords =  ["webp", "image", "encoder", "codec", "compression"]
