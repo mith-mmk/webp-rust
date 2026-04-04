@@ -931,6 +931,19 @@ pub(crate) fn decode_lossless_vp8l_to_argb(
     Ok((info.width, info.height, argb))
 }
 
+pub(crate) fn decode_lossless_stream_to_argb(
+    data: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u32>, DecoderError> {
+    let mut decoder = LosslessDecoder::new(data);
+    let argb = decoder.decode_image_stream(width, height, true)?;
+    if argb.len() != width * height {
+        return Err(DecoderError::Bitstream("decoded VP8L image has wrong size"));
+    }
+    Ok(argb)
+}
+
 /// Decodes a raw `VP8L` frame payload to RGBA.
 pub fn decode_lossless_vp8l_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
     let (width, height, argb) = decode_lossless_vp8l_to_argb(data)?;

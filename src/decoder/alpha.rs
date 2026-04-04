@@ -1,6 +1,6 @@
 //! Alpha-plane parsing and reconstruction helpers.
 
-use crate::decoder::lossless::decode_lossless_vp8l_to_argb;
+use crate::decoder::lossless::decode_lossless_stream_to_argb;
 use crate::decoder::DecoderError;
 
 const ALPHA_HEADER_LEN: usize = 1;
@@ -155,12 +155,7 @@ pub fn decode_alpha_plane(
             unfilter_alpha(&payload[..pixel_count], header.filter, width, height)
         }
         ALPHA_LOSSLESS_COMPRESSION => {
-            let (decoded_width, decoded_height, argb) = decode_lossless_vp8l_to_argb(payload)?;
-            if decoded_width != width || decoded_height != height {
-                return Err(DecoderError::Bitstream(
-                    "ALPH VP8L dimensions do not match image size",
-                ));
-            }
+            let argb = decode_lossless_stream_to_argb(payload, width, height)?;
             let mut filtered = vec![0u8; pixel_count];
             for (dst, pixel) in filtered.iter_mut().zip(argb.iter()) {
                 *dst = ((pixel >> 8) & 0xff) as u8;
@@ -194,6 +189,7 @@ pub fn apply_alpha_plane(rgba: &mut [u8], alpha: &[u8]) -> Result<(), DecoderErr
 #[cfg(test)]
 mod tests {
     use super::{decode_alpha_plane, ALPHA_FILTER_HORIZONTAL};
+    use std::path::PathBuf;
 
     #[test]
     fn decode_alpha_plane_unfilters_horizontal_rows() {
@@ -215,5 +211,20 @@ mod tests {
         let decoded = decode_alpha_plane(&filtered, width, height).unwrap();
 
         assert_eq!(decoded, plane);
+    }
+
+    #[test]
+    fn decode_lossless_alpha_plane_from_viewer_sample() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("samples")
+            .join("WML2Viewer.webp");
+        let data = std::fs::read(path).unwrap();
+        let parsed = crate::decoder::header::parse_animation_webp(&data).unwrap();
+        let frame = &parsed.frames[0];
+        let alpha =
+            decode_alpha_plane(frame.alpha_data.unwrap(), frame.width, frame.height).unwrap();
+        assert_eq!(alpha.len(), frame.width * frame.height);
     }
 }
