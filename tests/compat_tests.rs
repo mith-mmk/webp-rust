@@ -119,7 +119,7 @@ fn root_reexports_legacy_types() {
 
 #[test]
 fn compat_decode_decodes_still_images_via_callback_api() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
     let mut reader = BytesReader::from(data.to_vec());
     let mut drawer = RecordingDrawer::default();
     let mut options = DecodeOptions::new(&mut drawer);
@@ -142,7 +142,7 @@ fn compat_decode_decodes_still_images_via_callback_api() {
 
 #[test]
 fn compat_decode_decodes_animation_via_callback_api() {
-    let data = include_bytes!("../_testdata/sample_animation.webp");
+    let data = include_bytes!("../../_test/webp/sample_animation.webp");
     let mut reader = BytesReader::from(data.to_vec());
     let mut drawer = RecordingDrawer::default();
     let mut options = DecodeOptions::new(&mut drawer);

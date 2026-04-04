@@ -85,7 +85,7 @@ fn make_raw_alpha_chunk(alpha: &[u8]) -> Vec<u8> {
 }
 
 fn make_lossy_alpha_still_webp(alpha: &[u8]) -> Vec<u8> {
-    let sample = include_bytes!("../_testdata/sample.webp");
+    let sample = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(sample).unwrap();
     let vp8x = make_chunk(
         b"VP8X",
@@ -97,7 +97,7 @@ fn make_lossy_alpha_still_webp(alpha: &[u8]) -> Vec<u8> {
 }
 
 fn make_lossy_alpha_animation_webp(alpha: &[u8]) -> Vec<u8> {
-    let sample = include_bytes!("../_testdata/sample.webp");
+    let sample = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(sample).unwrap();
 
     let mut anmf_payload = Vec::new();
@@ -125,7 +125,7 @@ fn make_lossy_alpha_animation_webp(alpha: &[u8]) -> Vec<u8> {
 
 #[test]
 fn get_features_parses_lossy_sample() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
 
     let features = get_features(data).unwrap();
 
@@ -139,7 +139,7 @@ fn get_features_parses_lossy_sample() {
 
 #[test]
 fn parse_still_webp_exposes_vp8_payload() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
 
     let parsed = parse_still_webp(data).unwrap();
 
@@ -151,7 +151,7 @@ fn parse_still_webp_exposes_vp8_payload() {
 
 #[test]
 fn parse_lossy_headers_reads_sample_partition_headers() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(data).unwrap();
 
     let vp8 = parse_lossy_headers(parsed.image_data).unwrap();
@@ -169,7 +169,7 @@ fn parse_lossy_headers_reads_sample_partition_headers() {
 
 #[test]
 fn parse_macroblock_headers_reads_all_lossy_macroblocks() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(data).unwrap();
 
     let frame = parse_macroblock_headers(parsed.image_data).unwrap();
@@ -183,7 +183,7 @@ fn parse_macroblock_headers_reads_all_lossy_macroblocks() {
 
 #[test]
 fn parse_macroblock_data_reads_residual_coefficients() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(data).unwrap();
 
     let frame = parse_macroblock_data(parsed.image_data).unwrap();
@@ -197,7 +197,7 @@ fn parse_macroblock_data_reads_residual_coefficients() {
 
 #[test]
 fn decode_lossy_webp_to_rgba_matches_reference_pixels() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
 
     let image = decode_lossy_webp_to_rgba(data).unwrap();
 
@@ -242,7 +242,7 @@ fn decode_lossy_webp_to_rgba_matches_reference_pixels() {
 
 #[test]
 fn decode_lossy_vp8_to_rgba_matches_container_decode() {
-    let data = include_bytes!("../_testdata/sample.webp");
+    let data = include_bytes!("../../_test/webp/sample.webp");
     let parsed = parse_still_webp(data).unwrap();
 
     let from_container = decode_lossy_webp_to_rgba(data).unwrap();
@@ -269,7 +269,7 @@ fn get_features_parses_minimal_lossless_webp() {
 
 #[test]
 fn decode_lossless_webp_to_rgba_matches_reference_pixels() {
-    let data = include_bytes!("../_testdata/sample_lossless.webp");
+    let data = include_bytes!("../../_test/webp/sample_lossless.webp");
 
     let image = decode_lossless_webp_to_rgba(data).unwrap();
 
@@ -314,7 +314,7 @@ fn decode_lossless_webp_to_rgba_matches_reference_pixels() {
 
 #[test]
 fn decode_lossless_vp8l_to_rgba_matches_container_decode() {
-    let data = include_bytes!("../_testdata/sample_lossless.webp");
+    let data = include_bytes!("../../_test/webp/sample_lossless.webp");
     let parsed = parse_still_webp(data).unwrap();
 
     let from_container = decode_lossless_webp_to_rgba(data).unwrap();
@@ -325,7 +325,7 @@ fn decode_lossless_vp8l_to_rgba_matches_container_decode() {
 
 #[test]
 fn decode_alpha_plane_extracts_green_channel_from_lossless_payload() {
-    let data = include_bytes!("../_testdata/sample_lossless.webp");
+    let data = include_bytes!("../../_test/webp/sample_lossless.webp");
     let parsed = parse_still_webp(data).unwrap();
     let image = decode_lossless_webp_to_rgba(data).unwrap();
 
@@ -341,7 +341,7 @@ fn decode_alpha_plane_extracts_green_channel_from_lossless_payload() {
 
 #[test]
 fn decode_lossy_webp_to_rgba_applies_raw_alpha_chunk() {
-    let base = decode_lossy_webp_to_rgba(include_bytes!("../_testdata/sample.webp")).unwrap();
+    let base = decode_lossy_webp_to_rgba(include_bytes!("../../_test/webp/sample.webp")).unwrap();
     let alpha = make_alpha_plane(base.width, base.height);
     let webp = make_lossy_alpha_still_webp(&alpha);
 
@@ -364,7 +364,7 @@ fn decode_lossy_webp_to_rgba_applies_raw_alpha_chunk() {
 
 #[test]
 fn parse_animation_webp_reads_sample_animation_metadata() {
-    let data = include_bytes!("../_testdata/sample_animation.webp");
+    let data = include_bytes!("../../_test/webp/sample_animation.webp");
 
     let parsed = parse_animation_webp(data).unwrap();
 
@@ -391,7 +391,7 @@ fn parse_animation_webp_reads_sample_animation_metadata() {
 
 #[test]
 fn decode_animation_webp_matches_reference_pixels() {
-    let data = include_bytes!("../_testdata/sample_animation.webp");
+    let data = include_bytes!("../../_test/webp/sample_animation.webp");
 
     let animation = decode_animation_webp(data).unwrap();
 
@@ -440,7 +440,7 @@ fn decode_animation_webp_matches_reference_pixels() {
 
 #[test]
 fn decode_animation_webp_handles_lossy_alpha_frames() {
-    let base = decode_lossy_webp_to_rgba(include_bytes!("../_testdata/sample.webp")).unwrap();
+    let base = decode_lossy_webp_to_rgba(include_bytes!("../../_test/webp/sample.webp")).unwrap();
     let alpha = make_alpha_plane(base.width, base.height);
     let webp = make_lossy_alpha_animation_webp(&alpha);
 
