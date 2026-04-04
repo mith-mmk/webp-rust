@@ -218,8 +218,10 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("samples")
-            .join("WML2Viewer.webp");
+            .join("test")
+            .join("images")
+            .join("bundled")
+            .join("WML2Viewer_error.webp");
         let data = std::fs::read(path).unwrap();
         let parsed = crate::decoder::header::parse_animation_webp(&data).unwrap();
         let frame = &parsed.frames[0];

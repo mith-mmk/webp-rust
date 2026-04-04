@@ -53,7 +53,7 @@ fn read_header_rejects_non_riff_data() {
 
 #[test]
 fn read_header_parses_lossy_sample() {
-    let data = include_bytes!("../../_test/webp/sample.webp");
+    let data = include_bytes!("../samples/sample.webp");
     let mut reader = BytesReader::from(data.to_vec());
     let parsed = parse_still_webp(data).unwrap();
 
@@ -74,7 +74,7 @@ fn read_header_parses_lossy_sample() {
 
 #[test]
 fn read_header_keeps_animation_frame_alpha_payload() {
-    let sample = include_bytes!("../../_test/webp/sample.webp");
+    let sample = include_bytes!("../samples/sample.webp");
     let parsed = parse_still_webp(sample).unwrap();
     let alpha = vec![0x7f; parsed.features.width * parsed.features.height];
 
@@ -118,7 +118,7 @@ fn read_header_keeps_animation_frame_alpha_payload() {
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn image_from_file_decodes_still_webp() {
-    let sample = include_bytes!("../../_test/webp/sample.webp");
+    let sample = include_bytes!("../samples/sample.webp");
     let decoded = webp_rust::decode(sample).unwrap();
     let path = std::env::temp_dir().join(format!("webp-rust-{}-sample.webp", std::process::id()));
     std::fs::write(&path, sample).unwrap();
