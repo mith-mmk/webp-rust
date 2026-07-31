@@ -23,7 +23,11 @@ pub use compat::{
     Metadata, NextBlend, NextDispose, NextOption, NextOptions, ResponseCommand, RGBA,
 };
 pub use decoder::DecoderError;
-pub use encoder::{EncoderError, LosslessEncodingOptions, LossyEncodingOptions};
+pub use encoder::{
+    AlphaFilter, EncoderError, LosslessEncodingConfig, LossyEncodingConfig, WebpPreset,
+};
+#[cfg(feature = "legacy")]
+pub use encoder::{LosslessEncodingOptions, LossyEncodingOptions};
 pub use image::ImageBuffer;
 pub use legacy::{read_header, read_u24, AnimationControl, AnimationFrame, WebpHeader};
 
@@ -63,12 +67,32 @@ pub fn decode(data: &[u8]) -> Result<ImageBuffer, DecoderError> {
     })
 }
 
+/// Encodes an image as a still lossy WebP using the standard config API.
+pub fn encode_lossy_with_config(
+    image: &ImageBuffer,
+    config: &LossyEncodingConfig,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encoder::encode_lossy_image_to_webp_with_config_and_exif(image, config, exif)
+}
+
+/// Encodes an image as a still lossless WebP using the standard config API.
+pub fn encode_lossless_with_config(
+    image: &ImageBuffer,
+    config: &LosslessEncodingConfig,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encoder::encode_lossless_image_to_webp_with_config_and_exif(image, config, exif)
+}
+
+#[cfg(feature = "legacy")]
 fn to_lossless_options(optimize: usize) -> Result<LosslessEncodingOptions, EncoderError> {
     let optimization_level = u8::try_from(optimize)
         .map_err(|_| EncoderError::InvalidParam("lossless optimization level must be in 0..=9"))?;
     Ok(LosslessEncodingOptions { optimization_level })
 }
 
+#[cfg(feature = "legacy")]
 fn to_lossy_options(optimize: usize, quality: usize) -> Result<LossyEncodingOptions, EncoderError> {
     let optimization_level = u8::try_from(optimize)
         .map_err(|_| EncoderError::InvalidParam("lossy optimization level must be in 0..=9"))?;
@@ -87,6 +111,7 @@ fn to_lossy_options(optimize: usize, quality: usize) -> Result<LossyEncodingOpti
 /// encoding and must be in `0..=100`.
 ///
 /// If `exif` is present it is embedded as a raw `EXIF` chunk.
+#[cfg(feature = "legacy")]
 pub fn encode(
     image: &ImageBuffer,
     optimize: usize,
@@ -105,6 +130,7 @@ pub fn encode(
 /// `optimize` must be in `0..=9`. `quality` must be in `0..=100`.
 ///
 /// If `exif` is present it is embedded as a raw `EXIF` chunk.
+#[cfg(feature = "legacy")]
 pub fn encode_lossy(
     image: &ImageBuffer,
     optimize: usize,
@@ -120,6 +146,7 @@ pub fn encode_lossy(
 /// `optimize` must be in `0..=9`.
 ///
 /// If `exif` is present it is embedded as a raw `EXIF` chunk.
+#[cfg(feature = "legacy")]
 pub fn encode_lossless(
     image: &ImageBuffer,
     optimize: usize,

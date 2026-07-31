@@ -1,4 +1,4 @@
-# webp-rust
+# webp-rust 0.3.0
 
 [English](README.md) | [日本語](README.ja.md) | [Overview (JA)](OVERVIEW.ja.md)
 
@@ -9,6 +9,8 @@ Pure Rust WebP decoder and partial encoder.
 - Still image decode: `VP8` lossy, `VP8L` lossless
 - Still image encode: lossy `VP8` and lossless `VP8L` from RGBA
 - Alpha: `ALPH` for lossy still images and lossy animation frames
+- Libwebp-style encode configuration for quality, method, filtering, segments,
+  sharp YUV, partition limit, near-lossless, and alpha options
 - Animation: compositing to RGBA frame sequence
 - Library output: RGBA only
 - BMP output: example only
@@ -57,32 +59,33 @@ let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
 ```
 
-Advanced encoder tuning stays in the `encoder` module:
+The standard encoder API uses libwebp-style configuration objects:
 
 ```rust
-let lossy_options = webp_rust::LossyEncodingOptions {
-    quality: 90,
-    optimization_level: 0,
+let lossy_config = webp_rust::LossyEncodingConfig {
+    quality: 75.0,
+    method: 4,
+    ..Default::default()
 };
-let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif(
-    &image,
-    &lossy_options,
-    Some(exif_bytes),
-)?;
+let lossy = webp_rust::encode_lossy_with_config(&image, &lossy_config, Some(exif_bytes))?;
 
-let lossless_options = webp_rust::LosslessEncodingOptions {
-    optimization_level: 6,
+let lossless_config = webp_rust::LosslessEncodingConfig {
+    z_level: 6,
 };
-let lossless = webp_rust::encoder::encode_lossless_image_to_webp_with_options_and_exif(
-    &image,
-    &lossless_options,
-    Some(exif_bytes),
-)?;
+let lossless = webp_rust::encode_lossless_with_config(&image, &lossless_config, Some(exif_bytes))?;
 ```
 
-Current encoder scope is still-image only. The lossy path currently targets
-opaque RGBA input and emits a minimal intra-only `VP8` bitstream. Animated
-encode is not implemented.
+`LossyEncodingConfig::preset(WebpPreset::Photo)` and the other stable presets
+provide convenient libwebp-style starting points. Exact output bytes are not
+guaranteed to match a particular libwebp release.
+
+The old `optimization_level` API is isolated behind the opt-in Cargo feature:
+
+```toml
+webp-rust = { version = "0.3", features = ["legacy"] }
+```
+
+The legacy feature is disabled by default. Animated encode is not implemented.
 
 ## Examples
 
@@ -136,7 +139,12 @@ cargo run --example bmp2webp -- --lossy --quality 90 -z 9 input.bmp output.webp
 
 ```bash
 cargo test --tests
+cargo test --tests --features legacy
+cargo run --example webp_bench
 ```
+
+`webp_bench` writes temporary BMP/WebP files only below `.test-webp-bench`
+and compares the Rust encoder with `cwebp` when it is available on `PATH`.
 
 ## License
 

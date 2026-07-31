@@ -3,6 +3,7 @@
 use super::bitstream::*;
 use super::predict::*;
 use super::*;
+use crate::encoder::alpha::encode_alpha_payload;
 use crate::encoder::writer::ByteWriter;
 
 /// Builds a raw VP8 frame from the already encoded partitions.
@@ -121,16 +122,29 @@ fn finalize_lossy_candidate(
     mb_width: usize,
     mb_height: usize,
     base_quant: i32,
-    optimization_level: u8,
+    config: &LossyEncodingConfig,
     candidate: &EncodedLossyCandidate,
 ) -> Result<Vec<u8>, EncoderError> {
     let mb_count = mb_width * mb_height;
-    if !use_exhaustive_filter_search(optimization_level, mb_count) {
-        let filter = heuristic_filter(base_quant);
+    let configured_level = ((config.filter_strength as u16 * 63 + 50) / 100) as u8;
+    let configured_filter = FilterConfig {
+        simple: !config.strong_filter,
+        level: configured_level,
+        sharpness: config.filter_sharpness,
+    };
+    if !use_exhaustive_filter_search(config.method, mb_count) {
+        let filter = configured_filter;
         return build_candidate_vp8_frame(width, height, mb_width, mb_height, candidate, &filter);
     }
 
-    let filters = filter_candidates(base_quant);
+    let filters = filter_candidates(base_quant)
+        .into_iter()
+        .map(|filter| FilterConfig {
+            simple: configured_filter.simple,
+            level: ((filter.level as u16 * configured_level.max(1) as u16 + 31) / 63) as u8,
+            sharpness: configured_filter.sharpness,
+        })
+        .collect::<Vec<_>>();
     let mut best = None;
     for filter in &filters {
         let vp8 = build_candidate_vp8_frame(width, height, mb_width, mb_height, candidate, filter)?;
@@ -152,40 +166,68 @@ fn finalize_lossy_candidate(
     ))
 }
 
-/// Encodes RGBA pixels to a raw lossy `VP8` frame payload with explicit options.
-pub fn encode_lossy_rgba_to_vp8_with_options(
+fn prepare_lossy_color(rgba: &[u8], exact: bool, no_alpha: bool) -> Vec<u8> {
+    let mut color = rgba.to_vec();
+    for pixel in color.chunks_exact_mut(4) {
+        if !exact && pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
+        pixel[3] = 0xff;
+    }
+    if no_alpha {
+        color
+    } else {
+        color
+    }
+}
+
+fn apply_near_lossless(rgba: &mut [u8], near_lossless: u8) {
+    if near_lossless >= 100 {
+        return;
+    }
+    let step = ((100 - near_lossless) / 8).max(1);
+    for pixel in rgba.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            let value = *channel as u16;
+            *channel = ((value / step as u16) * step as u16).min(255) as u8;
+        }
+    }
+}
+
+/// Encodes RGBA pixels to a raw lossy `VP8` frame payload with libwebp-style options.
+pub fn encode_lossy_rgba_to_vp8_with_config(
     width: usize,
     height: usize,
     rgba: &[u8],
-    options: &LossyEncodingOptions,
+    config: &LossyEncodingConfig,
 ) -> Result<Vec<u8>, EncoderError> {
     validate_rgba(width, height, rgba)?;
-    validate_options(options)?;
+    validate_config(config)?;
+
+    let mut color = prepare_lossy_color(rgba, config.exact, config.no_alpha);
+    apply_near_lossless(&mut color, config.near_lossless);
 
     let mb_width = (width + 15) >> 4;
     let mb_height = (height + 15) >> 4;
-    let base_quant = base_quantizer_from_quality(options.quality);
-    let profile = lossy_search_profile(options.optimization_level);
-    let source = rgba_to_yuv420(width, height, rgba, mb_width, mb_height);
+    let base_quant = base_quantizer_from_quality(config.quality)
+        .saturating_add((config.partition_limit / 20) as i32);
+    let profile = lossy_search_profile(config.method);
+    let source =
+        rgba_to_yuv420_with_sharp_yuv(width, height, &color, mb_width, mb_height, config.sharp_yuv);
     let candidates = build_segment_candidates(
         &source,
         mb_width,
         mb_height,
         base_quant,
-        options.optimization_level,
+        config.method,
+        config.segments,
+        config.sns_strength,
     );
     let mut best = None;
     for segment in &candidates {
         let candidate = encode_lossy_candidate(&source, mb_width, mb_height, &profile, segment)?;
         let vp8 = finalize_lossy_candidate(
-            width,
-            height,
-            &source,
-            mb_width,
-            mb_height,
-            base_quant,
-            options.optimization_level,
-            &candidate,
+            width, height, &source, mb_width, mb_height, base_quant, config, &candidate,
         )?;
         let replace = match &best {
             Some((best_bytes, _)) => vp8.len() < *best_bytes,
@@ -201,26 +243,76 @@ pub fn encode_lossy_rgba_to_vp8_with_options(
     ))
 }
 
+/// Encodes RGBA pixels to a raw lossy `VP8` frame payload with legacy options.
+#[cfg(feature = "legacy")]
+pub fn encode_lossy_rgba_to_vp8_with_options(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LossyEncodingOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    options.validate(rgba)?;
+    encode_lossy_rgba_to_vp8_with_config(width, height, rgba, &options.to_config())
+}
+
 /// Encodes RGBA pixels to a raw lossy `VP8` frame payload.
 pub fn encode_lossy_rgba_to_vp8(
     width: usize,
     height: usize,
     rgba: &[u8],
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_rgba_to_vp8_with_options(width, height, rgba, &LossyEncodingOptions::default())
+    encode_lossy_rgba_to_vp8_with_config(width, height, rgba, &LossyEncodingConfig::default())
 }
 
-/// Encodes RGBA pixels to a still lossy WebP container with explicit options.
+/// Encodes RGBA pixels to a still lossy WebP container with libwebp-style options.
+pub fn encode_lossy_rgba_to_webp_with_config(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    config: &LossyEncodingConfig,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossy_rgba_to_webp_with_config_and_exif(width, height, rgba, config, None)
+}
+
+/// Encodes RGBA pixels to a still lossy WebP container with options and EXIF.
+pub fn encode_lossy_rgba_to_webp_with_config_and_exif(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    config: &LossyEncodingConfig,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    let vp8 = encode_lossy_rgba_to_vp8_with_config(width, height, rgba, config)?;
+    let alpha = if config.no_alpha || !rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff) {
+        None
+    } else {
+        Some(encode_alpha_payload(width, height, rgba, config)?)
+    };
+    wrap_still_webp(
+        StillImageChunk {
+            fourcc: *b"VP8 ",
+            payload: &vp8,
+            width,
+            height,
+            has_alpha: alpha.is_some(),
+            alpha_payload: alpha.as_deref(),
+        },
+        exif,
+    )
+}
+
+#[cfg(feature = "legacy")]
 pub fn encode_lossy_rgba_to_webp_with_options(
     width: usize,
     height: usize,
     rgba: &[u8],
     options: &LossyEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_rgba_to_webp_with_options_and_exif(width, height, rgba, options, None)
+    options.validate(rgba)?;
+    encode_lossy_rgba_to_webp_with_config(width, height, rgba, &options.to_config())
 }
 
-/// Encodes RGBA pixels to a still lossy WebP container with explicit options and EXIF.
+#[cfg(feature = "legacy")]
 pub fn encode_lossy_rgba_to_webp_with_options_and_exif(
     width: usize,
     height: usize,
@@ -228,17 +320,8 @@ pub fn encode_lossy_rgba_to_webp_with_options_and_exif(
     options: &LossyEncodingOptions,
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, EncoderError> {
-    let vp8 = encode_lossy_rgba_to_vp8_with_options(width, height, rgba, options)?;
-    wrap_still_webp(
-        StillImageChunk {
-            fourcc: *b"VP8 ",
-            payload: &vp8,
-            width,
-            height,
-            has_alpha: false,
-        },
-        exif,
-    )
+    options.validate(rgba)?;
+    encode_lossy_rgba_to_webp_with_config_and_exif(width, height, rgba, &options.to_config(), exif)
 }
 
 /// Encodes RGBA pixels to a still lossy WebP container.
@@ -247,35 +330,54 @@ pub fn encode_lossy_rgba_to_webp(
     height: usize,
     rgba: &[u8],
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_rgba_to_webp_with_options(width, height, rgba, &LossyEncodingOptions::default())
+    encode_lossy_rgba_to_webp_with_config(width, height, rgba, &LossyEncodingConfig::default())
 }
 
-/// Encodes an [`ImageBuffer`] to a still lossy WebP container with explicit options.
+/// Encodes an [`ImageBuffer`] to a still lossy WebP container with options.
+pub fn encode_lossy_image_to_webp_with_config(
+    image: &ImageBuffer,
+    config: &LossyEncodingConfig,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossy_image_to_webp_with_config_and_exif(image, config, None)
+}
+
+/// Encodes an [`ImageBuffer`] to a still lossy WebP container with options and EXIF.
+pub fn encode_lossy_image_to_webp_with_config_and_exif(
+    image: &ImageBuffer,
+    config: &LossyEncodingConfig,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossy_rgba_to_webp_with_config_and_exif(
+        image.width,
+        image.height,
+        &image.rgba,
+        config,
+        exif,
+    )
+}
+
+#[cfg(feature = "legacy")]
 pub fn encode_lossy_image_to_webp_with_options(
     image: &ImageBuffer,
     options: &LossyEncodingOptions,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_image_to_webp_with_options_and_exif(image, options, None)
+    options.validate(&image.rgba)?;
+    encode_lossy_image_to_webp_with_config(image, &options.to_config())
 }
 
-/// Encodes an [`ImageBuffer`] to a still lossy WebP container with explicit options and EXIF.
+#[cfg(feature = "legacy")]
 pub fn encode_lossy_image_to_webp_with_options_and_exif(
     image: &ImageBuffer,
     options: &LossyEncodingOptions,
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_rgba_to_webp_with_options_and_exif(
-        image.width,
-        image.height,
-        &image.rgba,
-        options,
-        exif,
-    )
+    options.validate(&image.rgba)?;
+    encode_lossy_image_to_webp_with_config_and_exif(image, &options.to_config(), exif)
 }
 
 /// Encodes an [`ImageBuffer`] to a still lossy WebP container.
 pub fn encode_lossy_image_to_webp(image: &ImageBuffer) -> Result<Vec<u8>, EncoderError> {
-    encode_lossy_image_to_webp_with_options(image, &LossyEncodingOptions::default())
+    encode_lossy_image_to_webp_with_config(image, &LossyEncodingConfig::default())
 }
 
 #[cfg(test)]
@@ -304,9 +406,9 @@ mod tests {
         let (width, height, rgba) = sample_rgba();
         let mb_width = (width + 15) >> 4;
         let mb_height = (height + 15) >> 4;
-        let options = LossyEncodingOptions::default();
+        let options = LossyEncodingConfig::default();
         let base_quant = base_quantizer_from_quality(options.quality);
-        let profile = lossy_search_profile(options.optimization_level);
+        let profile = lossy_search_profile(options.method);
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
         let segment = disabled_segment_config(mb_width * mb_height, clipped_quantizer(base_quant));
         let candidate =
@@ -367,9 +469,9 @@ mod tests {
             }
         }
 
-        let quant = build_quant_matrices(base_quantizer_from_quality(90));
+        let quant = build_quant_matrices(base_quantizer_from_quality(90.0));
         let rd = build_rd_multipliers(&quant);
-        let profile = lossy_search_profile(MAX_LOSSY_OPTIMIZATION_LEVEL);
+        let profile = lossy_search_profile(6);
         let top_modes = [B_DC_PRED; 4];
         let left_modes = [B_DC_PRED; 4];
         let top_context = NonZeroContext::default();
@@ -419,13 +521,7 @@ mod tests {
         }
 
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
-        let candidates = build_segment_candidates(
-            &source,
-            mb_width,
-            mb_height,
-            13,
-            MAX_LOSSY_OPTIMIZATION_LEVEL,
-        );
+        let candidates = build_segment_candidates(&source, mb_width, mb_height, 13, 6, 4, 50);
 
         assert!(candidates.iter().any(|candidate| candidate.use_segment));
         assert!(candidates
@@ -459,13 +555,7 @@ mod tests {
         }
 
         let source = rgba_to_yuv420(width, height, &rgba, mb_width, mb_height);
-        let candidates = build_segment_candidates(
-            &source,
-            mb_width,
-            mb_height,
-            13,
-            MAX_LOSSY_OPTIMIZATION_LEVEL,
-        );
+        let candidates = build_segment_candidates(&source, mb_width, mb_height, 13, 6, 4, 50);
 
         assert!(candidates.iter().any(|candidate| {
             candidate.use_segment && candidate.segments.iter().copied().max().unwrap_or(0) >= 2

@@ -1,6 +1,6 @@
 [package]
 name = "webp-rust"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Pure Rust implementation of a WebP encoder and decoder"
 keywords =  ["webp", "image", "encoder", "codec", "compression"]
@@ -9,6 +9,11 @@ license= "MIT"
 repository = "https://github.com/mith-mmk/webp-rust"
 documentation = "https://docs.rs/webp-rust"
 readme = "README.md"
+exclude = ["AGENTS.md", "Cargo.lock"]
+
+[features]
+default = []
+legacy = []
 
 [workspace]
 

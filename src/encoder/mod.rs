@@ -6,6 +6,7 @@
 //! The lossy path targets opaque still images and emits a minimal
 //! intra-only `VP8` bitstream.
 
+mod alpha;
 mod bit_writer;
 mod container;
 mod error;
@@ -17,16 +18,31 @@ mod writer;
 
 pub use error::EncoderError;
 pub use lossless::{
-    encode_lossless_image_to_webp, encode_lossless_image_to_webp_with_options,
-    encode_lossless_image_to_webp_with_options_and_exif, encode_lossless_rgba_to_vp8l,
-    encode_lossless_rgba_to_vp8l_with_options, encode_lossless_rgba_to_webp,
+    encode_lossless_image_to_webp, encode_lossless_image_to_webp_with_config,
+    encode_lossless_image_to_webp_with_config_and_exif, encode_lossless_rgba_to_vp8l,
+    encode_lossless_rgba_to_vp8l_with_config, encode_lossless_rgba_to_webp,
+    encode_lossless_rgba_to_webp_with_config, encode_lossless_rgba_to_webp_with_config_and_exif,
+    LosslessEncodingConfig,
+};
+pub use lossy::{
+    encode_lossy_image_to_webp, encode_lossy_image_to_webp_with_config,
+    encode_lossy_image_to_webp_with_config_and_exif, encode_lossy_rgba_to_vp8,
+    encode_lossy_rgba_to_vp8_with_config, encode_lossy_rgba_to_webp,
+    encode_lossy_rgba_to_webp_with_config, encode_lossy_rgba_to_webp_with_config_and_exif,
+    AlphaFilter, LossyEncodingConfig, WebpPreset,
+};
+
+#[cfg(feature = "legacy")]
+pub use lossless::{
+    encode_lossless_image_to_webp_with_options,
+    encode_lossless_image_to_webp_with_options_and_exif, encode_lossless_rgba_to_vp8l_with_options,
     encode_lossless_rgba_to_webp_with_options, encode_lossless_rgba_to_webp_with_options_and_exif,
     LosslessEncodingOptions,
 };
+
+#[cfg(feature = "legacy")]
 pub use lossy::{
-    encode_lossy_image_to_webp, encode_lossy_image_to_webp_with_options,
-    encode_lossy_image_to_webp_with_options_and_exif, encode_lossy_rgba_to_vp8,
-    encode_lossy_rgba_to_vp8_with_options, encode_lossy_rgba_to_webp,
-    encode_lossy_rgba_to_webp_with_options, encode_lossy_rgba_to_webp_with_options_and_exif,
-    LossyEncodingOptions,
+    encode_lossy_image_to_webp_with_options, encode_lossy_image_to_webp_with_options_and_exif,
+    encode_lossy_rgba_to_vp8_with_options, encode_lossy_rgba_to_webp_with_options,
+    encode_lossy_rgba_to_webp_with_options_and_exif, LossyEncodingOptions,
 };

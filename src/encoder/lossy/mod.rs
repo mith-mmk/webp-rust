@@ -30,26 +30,152 @@ const BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0];
 type CoeffProbTables = [[[[u8; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 type CoeffStats = [[[[u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES];
 
-const DEFAULT_LOSSY_OPTIMIZATION_LEVEL: u8 = 0;
-const MAX_LOSSY_OPTIMIZATION_LEVEL: u8 = 9;
+const MAX_LOSSY_METHOD: u8 = 6;
 
-/// Lossy encoder tuning knobs.
+/// Alpha-plane filtering mode compatible with the stable libwebp options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaFilter {
+    None,
+    Fast,
+    Best,
+}
+
+/// Image hint used by the libwebp-style presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebpPreset {
+    Default,
+    Photo,
+    Picture,
+    Drawing,
+    Icon,
+    Text,
+}
+
+/// Libwebp-style lossy encoder configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LossyEncodingConfig {
+    pub quality: f32,
+    pub method: u8,
+    pub segments: u8,
+    pub sns_strength: u8,
+    pub filter_strength: u8,
+    pub filter_sharpness: u8,
+    pub strong_filter: bool,
+    pub sharp_yuv: bool,
+    pub partition_limit: u8,
+    pub alpha_quality: u8,
+    pub alpha_method: u8,
+    pub alpha_filter: AlphaFilter,
+    pub exact: bool,
+    pub no_alpha: bool,
+    pub near_lossless: u8,
+}
+
+impl Default for LossyEncodingConfig {
+    fn default() -> Self {
+        Self {
+            quality: 75.0,
+            method: 4,
+            segments: 4,
+            sns_strength: 50,
+            filter_strength: 60,
+            filter_sharpness: 0,
+            strong_filter: true,
+            sharp_yuv: false,
+            partition_limit: 0,
+            alpha_quality: 100,
+            alpha_method: 1,
+            alpha_filter: AlphaFilter::Fast,
+            exact: false,
+            no_alpha: false,
+            near_lossless: 100,
+        }
+    }
+}
+
+impl LossyEncodingConfig {
+    /// Returns a stable libwebp-style preset before caller overrides.
+    pub fn preset(preset: WebpPreset) -> Self {
+        let mut config = Self::default();
+        match preset {
+            WebpPreset::Default => {}
+            WebpPreset::Photo => {
+                config.quality = 80.0;
+                config.sns_strength = 70;
+                config.method = 4;
+            }
+            WebpPreset::Picture => {
+                config.quality = 80.0;
+                config.sns_strength = 50;
+                config.method = 4;
+            }
+            WebpPreset::Drawing => {
+                config.quality = 75.0;
+                config.sns_strength = 25;
+                config.method = 4;
+            }
+            WebpPreset::Icon => {
+                config.quality = 85.0;
+                config.sns_strength = 0;
+                config.method = 4;
+            }
+            WebpPreset::Text => {
+                config.quality = 90.0;
+                config.sns_strength = 0;
+                config.method = 5;
+            }
+        }
+        config
+    }
+}
+
+#[cfg(feature = "legacy")]
+const DEFAULT_LOSSY_OPTIMIZATION_LEVEL: u8 = 0;
+
+/// Legacy lossy encoder tuning knobs.
+#[cfg(feature = "legacy")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LossyEncodingOptions {
-    /// Quality from `0` to `100`.
     pub quality: u8,
-    /// Search effort from `0` to `9`.
-    ///
-    /// The default `0` favors fast encode speed. `9` enables the heaviest
-    /// search profile currently implemented.
     pub optimization_level: u8,
 }
 
+#[cfg(feature = "legacy")]
 impl Default for LossyEncodingOptions {
     fn default() -> Self {
         Self {
             quality: 90,
             optimization_level: DEFAULT_LOSSY_OPTIMIZATION_LEVEL,
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+impl LossyEncodingOptions {
+    pub(crate) fn validate(self, rgba: &[u8]) -> Result<(), EncoderError> {
+        if self.quality > 100 {
+            return Err(EncoderError::InvalidParam(
+                "lossy quality must be in 0..=100",
+            ));
+        }
+        if self.optimization_level > 9 {
+            return Err(EncoderError::InvalidParam(
+                "lossy optimization level must be in 0..=9",
+            ));
+        }
+        if rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff) {
+            return Err(EncoderError::InvalidParam(
+                "lossy encoder does not support alpha yet",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn to_config(self) -> LossyEncodingConfig {
+        LossyEncodingConfig {
+            quality: self.quality as f32,
+            method: self.optimization_level.min(MAX_LOSSY_METHOD),
+            ..LossyEncodingConfig::default()
         }
     }
 }
@@ -131,7 +257,7 @@ struct LossySearchProfile {
     update_probabilities: bool,
 }
 
-/// Validates rgba.
+/// Validates rgba dimensions and storage.
 fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), EncoderError> {
     if width == 0 || height == 0 {
         return Err(EncoderError::InvalidParam(
@@ -152,32 +278,36 @@ fn validate_rgba(width: usize, height: usize, rgba: &[u8]) -> Result<(), Encoder
             "RGBA buffer length does not match dimensions",
         ));
     }
-    if rgba.chunks_exact(4).any(|pixel| pixel[3] != 0xff) {
-        return Err(EncoderError::InvalidParam(
-            "lossy encoder does not support alpha yet",
-        ));
-    }
     Ok(())
 }
 
-/// Validates options.
-fn validate_options(options: &LossyEncodingOptions) -> Result<(), EncoderError> {
-    if options.quality > 100 {
+/// Validates libwebp-style options.
+fn validate_config(options: &LossyEncodingConfig) -> Result<(), EncoderError> {
+    if !options.quality.is_finite() || !(0.0..=100.0).contains(&options.quality) {
         return Err(EncoderError::InvalidParam(
-            "lossy quality must be in 0..=100",
+            "lossy quality must be finite and in 0..=100",
         ));
     }
-    if options.optimization_level > MAX_LOSSY_OPTIMIZATION_LEVEL {
-        return Err(EncoderError::InvalidParam(
-            "lossy optimization level must be in 0..=9",
-        ));
+    if options.method > MAX_LOSSY_METHOD {
+        return Err(EncoderError::InvalidParam("lossy method must be in 0..=6"));
+    }
+    if !(1..=4).contains(&options.segments)
+        || options.sns_strength > 100
+        || options.filter_strength > 100
+        || options.filter_sharpness > 7
+        || options.partition_limit > 100
+        || options.alpha_quality > 100
+        || options.alpha_method > 1
+        || options.near_lossless > 100
+    {
+        return Err(EncoderError::InvalidParam("invalid lossy encoding option"));
     }
     Ok(())
 }
 
 /// Converts a user quality value into the base VP8 quantizer.
-fn base_quantizer_from_quality(quality: u8) -> i32 {
-    (((100 - quality as i32) * 127) + 50) / 100
+fn base_quantizer_from_quality(quality: f32) -> i32 {
+    (((100.0 - quality.clamp(0.0, 100.0)) * 127.0) + 50.0) as i32 / 100
 }
 
 /// Builds quant matrices.
@@ -232,23 +362,9 @@ fn filter_candidates(base_quant: i32) -> Vec<FilterConfig> {
         .collect()
 }
 
-/// Internal helper for heuristic filter.
-fn heuristic_filter(base_quant: i32) -> FilterConfig {
-    let level = if base_quant <= 10 {
-        0
-    } else {
-        clipped_quantizer((base_quant * 3 + 2) / 4).min(63)
-    };
-    FilterConfig {
-        simple: false,
-        level,
-        sharpness: 0,
-    }
-}
-
 /// Builds the lossy search profile for a given optimization level.
-fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
-    match optimization_level {
+fn lossy_search_profile(method: u8) -> LossySearchProfile {
+    match method {
         0 => LossySearchProfile {
             fast_mode_search: true,
             allow_i4x4: false,
@@ -323,16 +439,16 @@ fn lossy_search_profile(optimization_level: u8) -> LossySearchProfile {
 }
 
 /// Returns whether the current lossy effort level should exhaustively search segments.
-fn use_exhaustive_segment_search(optimization_level: u8) -> bool {
-    optimization_level >= 9
+fn use_exhaustive_segment_search(method: u8) -> bool {
+    method >= 6
 }
 
 /// Returns whether the current lossy effort level should exhaustively search loop filters.
-fn use_exhaustive_filter_search(optimization_level: u8, mb_count: usize) -> bool {
-    if optimization_level >= 9 {
+fn use_exhaustive_filter_search(method: u8, mb_count: usize) -> bool {
+    if method >= 6 {
         return true;
     }
-    if optimization_level >= 6 {
+    if method >= 5 {
         return mb_count < 2_048;
     }
     mb_count < 1_024
@@ -397,12 +513,13 @@ fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
 }
 
 /// Internal helper for rgba to yuv420.
-fn rgba_to_yuv420(
+fn rgba_to_yuv420_with_sharp_yuv(
     width: usize,
     height: usize,
     rgba: &[u8],
     mb_width: usize,
     mb_height: usize,
+    sharp_yuv: bool,
 ) -> Planes {
     let y_stride = mb_width * 16;
     let uv_stride = mb_width * 8;
@@ -426,18 +543,31 @@ fn rgba_to_yuv420(
             let mut sum_r = 0i32;
             let mut sum_g = 0i32;
             let mut sum_b = 0i32;
+            let mut weight_sum = 0i32;
             for dy in 0..2 {
                 let src_y = (py * 2 + dy).min(height - 1);
                 for dx in 0..2 {
                     let src_x = (px * 2 + dx).min(width - 1);
                     let offset = (src_y * width + src_x) * 4;
-                    sum_r += rgba[offset] as i32;
-                    sum_g += rgba[offset + 1] as i32;
-                    sum_b += rgba[offset + 2] as i32;
+                    let weight = if sharp_yuv {
+                        if dx == dy {
+                            2
+                        } else {
+                            1
+                        }
+                    } else {
+                        1
+                    };
+                    weight_sum += weight;
+                    sum_r += rgba[offset] as i32 * weight;
+                    sum_g += rgba[offset + 1] as i32 * weight;
+                    sum_b += rgba[offset + 2] as i32 * weight;
                 }
             }
-            u[py * uv_stride + px] = rgb_to_u(sum_r, sum_g, sum_b);
-            v[py * uv_stride + px] = rgb_to_v(sum_r, sum_g, sum_b);
+            u[py * uv_stride + px] =
+                rgb_to_u(sum_r / weight_sum, sum_g / weight_sum, sum_b / weight_sum);
+            v[py * uv_stride + px] =
+                rgb_to_v(sum_r / weight_sum, sum_g / weight_sum, sum_b / weight_sum);
         }
     }
 
@@ -448,6 +578,17 @@ fn rgba_to_yuv420(
         u,
         v,
     }
+}
+
+#[cfg(test)]
+fn rgba_to_yuv420(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    mb_width: usize,
+    mb_height: usize,
+) -> Planes {
+    rgba_to_yuv420_with_sharp_yuv(width, height, rgba, mb_width, mb_height, false)
 }
 
 /// Internal helper for empty reconstructed planes.
@@ -614,14 +755,16 @@ fn build_segment_candidates(
     mb_width: usize,
     mb_height: usize,
     base_quant: i32,
-    optimization_level: u8,
+    method: u8,
+    segment_limit: u8,
+    sns_strength: u8,
 ) -> Vec<SegmentConfig> {
     let mb_count = mb_width * mb_height;
     let mut candidates = vec![disabled_segment_config(
         mb_count,
         clipped_quantizer(base_quant),
     )];
-    if mb_count < 8 || optimization_level == 0 {
+    if mb_count < 8 || method == 0 || segment_limit <= 1 || sns_strength == 0 {
         return candidates;
     }
 
@@ -634,16 +777,23 @@ fn build_segment_candidates(
     let mut sorted = activities.clone();
     sorted.sort_unstable();
 
-    if !use_exhaustive_segment_search(optimization_level) && mb_count >= 1_024 {
-        if let Some(config) = build_segment_config(&activities, &sorted, 65, 12, -2, base_quant) {
+    if !use_exhaustive_segment_search(method) && mb_count >= 1_024 {
+        if let Some(config) = build_segment_config(
+            &activities,
+            &sorted,
+            (100usize.saturating_sub(sns_strength as usize / 2)).clamp(50, 80),
+            12,
+            -2,
+            base_quant,
+        ) {
             return vec![config];
         }
         return candidates;
     }
 
-    let two_segment_presets: &[(usize, i32, i32)] = if optimization_level <= 2 {
+    let two_segment_presets: &[(usize, i32, i32)] = if method <= 2 {
         &[(65usize, 12i32, -2i32)]
-    } else if mb_count >= 2_048 && !use_exhaustive_segment_search(optimization_level) {
+    } else if mb_count >= 2_048 && !use_exhaustive_segment_search(method) {
         &[(65usize, 12i32, -2i32), (55, 10, 0)]
     } else {
         &[(55usize, 10i32, 0i32), (65, 12, -2), (45, 8, 0)]
@@ -661,8 +811,9 @@ fn build_segment_candidates(
         }
     }
 
-    if optimization_level >= 4
-        && (use_exhaustive_segment_search(optimization_level) || mb_count < 2_048)
+    if segment_limit >= 3
+        && method >= 4
+        && (use_exhaustive_segment_search(method) || mb_count < 2_048)
     {
         for (percentiles, deltas) in [
             (&[35usize, 72usize][..], &[12i32, 4i32, -4i32][..]),
@@ -675,10 +826,16 @@ fn build_segment_candidates(
                 &[18i32, 10i32, 2i32, -8i32][..],
             ),
         ] {
-            if let Some(config) =
-                build_multi_segment_config(&activities, &sorted, percentiles, deltas, base_quant)
-            {
-                candidates.push(config);
+            if deltas.len() <= segment_limit as usize {
+                if let Some(config) = build_multi_segment_config(
+                    &activities,
+                    &sorted,
+                    percentiles,
+                    deltas,
+                    base_quant,
+                ) {
+                    candidates.push(config);
+                }
             }
         }
     }

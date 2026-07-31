@@ -3,21 +3,21 @@
 use super::plans::*;
 use super::*;
 
-/// Encodes RGBA pixels to a raw lossless `VP8L` frame payload with explicit options.
-pub fn encode_lossless_rgba_to_vp8l_with_options(
+/// Encodes RGBA pixels to a raw lossless `VP8L` frame payload with libwebp-style options.
+pub fn encode_lossless_rgba_to_vp8l_with_config(
     width: usize,
     height: usize,
     rgba: &[u8],
-    options: &LosslessEncodingOptions,
+    config: &LosslessEncodingConfig,
 ) -> Result<Vec<u8>, EncoderError> {
     validate_rgba(width, height, rgba)?;
-    validate_options(options)?;
+    validate_config(config)?;
 
     let argb = rgba_to_argb(rgba);
     let subtract_green = apply_subtract_green_transform(&argb);
     let mut best = None;
 
-    for profile in lossless_candidate_profiles(options.optimization_level) {
+    for profile in lossless_candidate_profiles(config.z_level) {
         let mut profile_best =
             if let Some(candidate) = build_palette_candidate(width, height, &argb)? {
                 Some(encode_palette_candidate_to_vp8l(
@@ -64,39 +64,49 @@ pub fn encode_lossless_rgba_to_vp8l_with_options(
     ))
 }
 
+#[cfg(feature = "legacy")]
+pub fn encode_lossless_rgba_to_vp8l_with_options(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LosslessEncodingOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_rgba_to_vp8l_with_config(width, height, rgba, &options.to_config())
+}
+
 /// Encodes RGBA pixels to a raw lossless `VP8L` frame payload.
 pub fn encode_lossless_rgba_to_vp8l(
     width: usize,
     height: usize,
     rgba: &[u8],
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_rgba_to_vp8l_with_options(
+    encode_lossless_rgba_to_vp8l_with_config(
         width,
         height,
         rgba,
-        &LosslessEncodingOptions::default(),
+        &LosslessEncodingConfig::default(),
     )
 }
 
-/// Encodes RGBA pixels to a still lossless WebP container with explicit options.
-pub fn encode_lossless_rgba_to_webp_with_options(
+/// Encodes RGBA pixels to a still lossless WebP container with options.
+pub fn encode_lossless_rgba_to_webp_with_config(
     width: usize,
     height: usize,
     rgba: &[u8],
-    options: &LosslessEncodingOptions,
+    config: &LosslessEncodingConfig,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_rgba_to_webp_with_options_and_exif(width, height, rgba, options, None)
+    encode_lossless_rgba_to_webp_with_config_and_exif(width, height, rgba, config, None)
 }
 
-/// Encodes RGBA pixels to a still lossless WebP container with explicit options and EXIF.
-pub fn encode_lossless_rgba_to_webp_with_options_and_exif(
+/// Encodes RGBA pixels to a still lossless WebP container with options and EXIF.
+pub fn encode_lossless_rgba_to_webp_with_config_and_exif(
     width: usize,
     height: usize,
     rgba: &[u8],
-    options: &LosslessEncodingOptions,
+    config: &LosslessEncodingConfig,
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, EncoderError> {
-    let vp8l = encode_lossless_rgba_to_vp8l_with_options(width, height, rgba, options)?;
+    let vp8l = encode_lossless_rgba_to_vp8l_with_config(width, height, rgba, config)?;
     wrap_still_webp(
         StillImageChunk {
             fourcc: *b"VP8L",
@@ -104,6 +114,7 @@ pub fn encode_lossless_rgba_to_webp_with_options_and_exif(
             width,
             height,
             has_alpha: rgba_has_alpha(rgba),
+            alpha_payload: None,
         },
         exif,
     )
@@ -115,38 +126,82 @@ pub fn encode_lossless_rgba_to_webp(
     height: usize,
     rgba: &[u8],
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_rgba_to_webp_with_options(
+    encode_lossless_rgba_to_webp_with_config(
         width,
         height,
         rgba,
-        &LosslessEncodingOptions::default(),
+        &LosslessEncodingConfig::default(),
     )
 }
 
-/// Encodes an [`ImageBuffer`] to a still lossless WebP container with explicit options.
-pub fn encode_lossless_image_to_webp_with_options(
+/// Encodes an [`ImageBuffer`] to a still lossless WebP container with options.
+pub fn encode_lossless_image_to_webp_with_config(
     image: &ImageBuffer,
-    options: &LosslessEncodingOptions,
+    config: &LosslessEncodingConfig,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_image_to_webp_with_options_and_exif(image, options, None)
+    encode_lossless_image_to_webp_with_config_and_exif(image, config, None)
 }
 
-/// Encodes an [`ImageBuffer`] to a still lossless WebP container with explicit options and EXIF.
-pub fn encode_lossless_image_to_webp_with_options_and_exif(
+/// Encodes an [`ImageBuffer`] to a still lossless WebP container with options and EXIF.
+pub fn encode_lossless_image_to_webp_with_config_and_exif(
     image: &ImageBuffer,
-    options: &LosslessEncodingOptions,
+    config: &LosslessEncodingConfig,
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_rgba_to_webp_with_options_and_exif(
+    encode_lossless_rgba_to_webp_with_config_and_exif(
         image.width,
         image.height,
         &image.rgba,
-        options,
+        config,
         exif,
     )
 }
 
 /// Encodes an [`ImageBuffer`] to a still lossless WebP container.
 pub fn encode_lossless_image_to_webp(image: &ImageBuffer) -> Result<Vec<u8>, EncoderError> {
-    encode_lossless_image_to_webp_with_options(image, &LosslessEncodingOptions::default())
+    encode_lossless_image_to_webp_with_config(image, &LosslessEncodingConfig::default())
+}
+
+#[cfg(feature = "legacy")]
+pub fn encode_lossless_rgba_to_webp_with_options(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LosslessEncodingOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_rgba_to_webp_with_config(width, height, rgba, &options.to_config())
+}
+
+#[cfg(feature = "legacy")]
+pub fn encode_lossless_rgba_to_webp_with_options_and_exif(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    options: &LosslessEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_rgba_to_webp_with_config_and_exif(
+        width,
+        height,
+        rgba,
+        &options.to_config(),
+        exif,
+    )
+}
+
+#[cfg(feature = "legacy")]
+pub fn encode_lossless_image_to_webp_with_options(
+    image: &ImageBuffer,
+    options: &LosslessEncodingOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_image_to_webp_with_config(image, &options.to_config())
+}
+
+#[cfg(feature = "legacy")]
+pub fn encode_lossless_image_to_webp_with_options_and_exif(
+    image: &ImageBuffer,
+    options: &LosslessEncodingOptions,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, EncoderError> {
+    encode_lossless_image_to_webp_with_config_and_exif(image, &options.to_config(), exif)
 }

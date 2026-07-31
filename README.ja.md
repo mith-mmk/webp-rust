@@ -1,4 +1,4 @@
-# webp-rust
+# webp-rust 0.3.0
 
 [English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
@@ -11,6 +11,8 @@ Pure Rust の WebP decoder / encoder です。
 - still image decode: lossy `VP8`, lossless `VP8L`
 - still image encode: lossy `VP8`, lossless `VP8L`
 - alpha: lossy still image と lossy animation frame の `ALPH`
+- libwebp 互換の quality / method / filter / segment / sharp YUV /
+  partition limit / near-lossless / alpha option
 - animation: RGBA frame sequence への compositing
 - library 出力: RGBA
 - BMP 出力: example のみ
@@ -58,30 +60,32 @@ let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
 ```
 
-高度な encode option は `encoder` module 側にあります。
+標準の encoder API は libwebp 互換の config を使います。
 
 ```rust
-let lossy_options = webp_rust::LossyEncodingOptions {
-    quality: 90,
-    optimization_level: 0,
+let lossy_config = webp_rust::LossyEncodingConfig {
+    quality: 75.0,
+    method: 4,
+    ..Default::default()
 };
-let lossy = webp_rust::encoder::encode_lossy_image_to_webp_with_options_and_exif(
-    &image,
-    &lossy_options,
-    Some(exif_bytes),
-)?;
+let lossy = webp_rust::encode_lossy_with_config(&image, &lossy_config, Some(exif_bytes))?;
 
-let lossless_options = webp_rust::LosslessEncodingOptions {
-    optimization_level: 6,
+let lossless_config = webp_rust::LosslessEncodingConfig {
+    z_level: 6,
 };
-let lossless = webp_rust::encoder::encode_lossless_image_to_webp_with_options_and_exif(
-    &image,
-    &lossless_options,
-    Some(exif_bytes),
-)?;
+let lossless = webp_rust::encode_lossless_with_config(&image, &lossless_config, Some(exif_bytes))?;
 ```
 
-現在の encoder は still image のみです。lossy encode は opaque RGBA を前提にした intra-only `VP8` bitstream を出力します。animation encode は未実装です。
+`LossyEncodingConfig::preset(WebpPreset::Photo)` などで libwebp 互換の
+プリセットを利用できます。特定の libwebp 版との byte-perfect 一致は保証しません。
+
+旧 `optimization_level` API は opt-in の Cargo feature に分離されています。
+
+```toml
+webp-rust = { version = "0.3", features = ["legacy"] }
+```
+
+`legacy` は既定無効です。animation encode は未実装です。
 
 ## Examples
 
@@ -133,7 +137,12 @@ cargo run --example bmp2webp -- --lossy --quality 90 -z 9 input.bmp output.webp
 
 ```bash
 cargo test --tests
+cargo test --tests --features legacy
+cargo run --example webp_bench
 ```
+
+`webp_bench` は一時 BMP/WebP を `.test-webp-bench` 配下だけに作成し、
+`PATH` 上の `cwebp` が利用できる場合は Rust encoder と比較します。
 
 ## 関連文書
 

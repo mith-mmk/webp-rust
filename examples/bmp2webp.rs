@@ -3,9 +3,9 @@ use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use webp_rust::encoder::{
-    encode_lossless_image_to_webp_with_options, encode_lossy_image_to_webp_with_options,
+    encode_lossless_image_to_webp_with_config, encode_lossy_image_to_webp_with_config,
 };
-use webp_rust::{ImageBuffer, LosslessEncodingOptions, LossyEncodingOptions};
+use webp_rust::{ImageBuffer, LosslessEncodingConfig, LossyEncodingConfig};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -168,8 +168,8 @@ fn parse_optimization_level(value: &str) -> Result<u8, Error> {
 
 fn parse_lossy_optimization_level(value: &str) -> Result<u8, Error> {
     let level = parse_u8_level(value, "lossy optimization level")?;
-    if level > 9 {
-        return Err(invalid_input("lossy optimization level must be in 0..=9"));
+    if level > 6 {
+        return Err(invalid_input("lossy method must be in 0..=6"));
     }
     Ok(level)
 }
@@ -188,9 +188,9 @@ fn main() -> Result<(), Error> {
     let mut args = std::env::args_os().skip(1);
     let mut input = None;
     let mut output = None;
-    let mut options = LosslessEncodingOptions::default();
+    let mut options = LosslessEncodingConfig::default();
     let mut lossy = false;
-    let mut lossy_options = LossyEncodingOptions::default();
+    let mut lossy_options = LossyEncodingConfig::default();
     let mut shared_optimization_level = None;
     let mut lossless_optimization_explicit = false;
     let mut lossy_optimization_explicit = false;
@@ -200,12 +200,12 @@ fn main() -> Result<(), Error> {
             "--lossy" => lossy = true,
             "--opt" | "--opt-level" | "-O" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
-                options.optimization_level = parse_optimization_level(&value.to_string_lossy())?;
+                options.z_level = parse_optimization_level(&value.to_string_lossy())?;
                 lossless_optimization_explicit = true;
             }
             "--quality" | "-q" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
-                lossy_options.quality = parse_quality(&value.to_string_lossy())?;
+                lossy_options.quality = parse_quality(&value.to_string_lossy())? as f32;
             }
             "-z" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
@@ -216,8 +216,7 @@ fn main() -> Result<(), Error> {
             }
             "--lossy-opt-level" => {
                 let value = args.next().ok_or_else(|| invalid_input(usage()))?;
-                lossy_options.optimization_level =
-                    parse_lossy_optimization_level(&value.to_string_lossy())?;
+                lossy_options.method = parse_lossy_optimization_level(&value.to_string_lossy())?;
                 lossy_optimization_explicit = true;
             }
             _ => {
@@ -235,14 +234,14 @@ fn main() -> Result<(), Error> {
     if let Some(level) = shared_optimization_level {
         if lossy {
             if !lossy_optimization_explicit {
-                lossy_options.optimization_level = if level <= 9 {
+                lossy_options.method = if level <= 6 {
                     level
                 } else {
-                    return Err(invalid_input("lossy optimization level must be in 0..=9"));
+                    return Err(invalid_input("lossy method must be in 0..=6"));
                 };
             }
         } else if !lossless_optimization_explicit {
-            options.optimization_level = if level <= 9 {
+            options.z_level = if level <= 9 {
                 level
             } else {
                 return Err(invalid_input("optimization level must be in 0..=9"));
@@ -256,9 +255,9 @@ fn main() -> Result<(), Error> {
     let data = fs::read(&input)?;
     let image = decode_bmp_to_rgba(&data)?;
     let webp = if lossy {
-        encode_lossy_image_to_webp_with_options(&image, &lossy_options)?
+        encode_lossy_image_to_webp_with_config(&image, &lossy_options)?
     } else {
-        encode_lossless_image_to_webp_with_options(&image, &options)?
+        encode_lossless_image_to_webp_with_config(&image, &options)?
     };
 
     if let Some(parent) = output.parent() {

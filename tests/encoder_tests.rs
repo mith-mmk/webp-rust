@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy")]
+
 use webp_rust::decoder::{
     decode_lossless_vp8l_to_rgba, decode_lossy_vp8_to_rgba, get_features, parse_macroblock_headers,
     WebpFormat,

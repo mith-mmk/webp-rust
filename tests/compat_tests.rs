@@ -4,6 +4,7 @@ use webp_rust::compat::{
     self, CallbackResponse, DataMap, DecodeOptions, DrawCallback, DrawOptions, InitOptions,
     NextOptions, ResponseCommand, TerminateOptions, VerboseOptions, RGBA,
 };
+use webp_rust::decoder::{get_features, parse_animation_webp};
 use webp_rust::{read_header, read_u24, AnimationControl, AnimationFrame, ImageBuffer, WebpHeader};
 
 type Error = Box<dyn std::error::Error>;
@@ -127,7 +128,8 @@ fn compat_decode_decodes_still_images_via_callback_api() {
     compat::decode(&mut reader, &mut options).unwrap();
 
     let (width, height, init) = drawer.init.as_ref().unwrap();
-    assert_eq!((*width, *height), (1152, 896));
+    let features = get_features(data).unwrap();
+    assert_eq!((*width, *height), (features.width, features.height));
     assert!(!init.animation);
     assert_eq!(drawer.draws.len(), 1);
     assert!(drawer.nexts.is_empty());
@@ -135,8 +137,14 @@ fn compat_decode_decodes_still_images_via_callback_api() {
         drawer.metadata.get("Format"),
         Some(&DataMap::Ascii("WEBP".to_string()))
     );
-    assert_eq!(drawer.metadata.get("width"), Some(&DataMap::UInt(1152)));
-    assert_eq!(drawer.metadata.get("height"), Some(&DataMap::UInt(896)));
+    assert_eq!(
+        drawer.metadata.get("width"),
+        Some(&DataMap::UInt(features.width as u64))
+    );
+    assert_eq!(
+        drawer.metadata.get("height"),
+        Some(&DataMap::UInt(features.height as u64))
+    );
     assert!(drawer.terminated);
 }
 
@@ -150,22 +158,24 @@ fn compat_decode_decodes_animation_via_callback_api() {
     compat::decode(&mut reader, &mut options).unwrap();
 
     let (width, height, init) = drawer.init.as_ref().unwrap();
-    assert_eq!((*width, *height), (1200, 1200));
+    let features = get_features(data).unwrap();
+    let parsed = parse_animation_webp(data).unwrap();
+    assert_eq!((*width, *height), (features.width, features.height));
     assert!(init.animation);
     assert_eq!(
         init.background,
         Some(RGBA {
-            red: 0xb5,
-            green: 0xee,
-            blue: 0xf8,
-            alpha: 0xff,
+            red: (parsed.animation.background_color >> 16) as u8,
+            green: (parsed.animation.background_color >> 8) as u8,
+            blue: parsed.animation.background_color as u8,
+            alpha: (parsed.animation.background_color >> 24) as u8,
         })
     );
-    assert_eq!(drawer.nexts.len(), 7);
+    assert_eq!(drawer.nexts.len(), parsed.frames.len());
     assert_eq!(
         drawer.metadata.get("Animation frames"),
-        Some(&DataMap::UInt(7))
+        Some(&DataMap::UInt(parsed.frames.len() as u64))
     );
-    assert!(drawer.draws.len() >= 7);
+    assert!(drawer.draws.len() >= parsed.frames.len());
     assert!(drawer.terminated);
 }

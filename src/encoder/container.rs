@@ -13,6 +13,7 @@ pub(crate) struct StillImageChunk<'a> {
     pub width: usize,
     pub height: usize,
     pub has_alpha: bool,
+    pub alpha_payload: Option<&'a [u8]>,
 }
 
 /// Internal helper for padded len.
@@ -73,7 +74,7 @@ pub(crate) fn wrap_still_webp(
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, EncoderError> {
     let padded_image_size = padded_len(image.payload.len())?;
-    if exif.is_none() {
+    if exif.is_none() && image.alpha_payload.is_none() {
         let body_size = 4usize
             .checked_add(8)
             .and_then(|size| size.checked_add(padded_image_size))
@@ -84,18 +85,32 @@ pub(crate) fn wrap_still_webp(
         return extend_riff(body);
     }
 
-    let exif = exif.unwrap();
     let vp8x_payload_size = 10usize;
-    let padded_exif_size = padded_len(exif.len())?;
+    let padded_exif_size = match exif {
+        Some(payload) => padded_len(payload.len())?,
+        None => 0,
+    };
+    let padded_alpha_size = match image.alpha_payload {
+        Some(payload) => padded_len(payload.len())?,
+        None => 0,
+    };
     let body_size = 4usize
         .checked_add(8 + vp8x_payload_size)
         .and_then(|size| size.checked_add(8 + padded_image_size))
-        .and_then(|size| size.checked_add(8 + padded_exif_size))
+        .and_then(|size| {
+            image
+                .alpha_payload
+                .map_or(Some(size), |_| size.checked_add(8 + padded_alpha_size))
+        })
+        .and_then(|size| exif.map_or(Some(size), |_| size.checked_add(8 + padded_exif_size)))
         .ok_or(EncoderError::InvalidParam("encoded output is too large"))?;
     let mut body = ByteWriter::with_capacity(body_size);
     body.write_bytes(b"WEBP");
 
-    let mut flags = EXIF_FLAG;
+    let mut flags = 0;
+    if exif.is_some() {
+        flags |= EXIF_FLAG;
+    }
     if image.has_alpha {
         flags |= ALPHA_FLAG;
     }
@@ -107,7 +122,12 @@ pub(crate) fn wrap_still_webp(
     vp8x_payload.write_bytes(&height);
 
     append_chunk(&mut body, b"VP8X", &vp8x_payload.into_bytes())?;
+    if let Some(alpha) = image.alpha_payload {
+        append_chunk(&mut body, b"ALPH", alpha)?;
+    }
     append_chunk(&mut body, &image.fourcc, image.payload)?;
-    append_chunk(&mut body, b"EXIF", exif)?;
+    if let Some(exif) = exif {
+        append_chunk(&mut body, b"EXIF", exif)?;
+    }
     extend_riff(body)
 }

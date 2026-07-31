@@ -11,6 +11,8 @@
 
 - decode: still lossy (`VP8`), still lossless (`VP8L`), alpha, animation compositing
 - encode: still lossy (`VP8`), still lossless (`VP8L`)
+- lossy encode: `LossyEncodingConfig` による libwebp 互換 option
+- legacy encode: `optimization_level` を `legacy` feature 配下で提供
 - library の画像出力: RGBA
 - example の出力: BMP
 
@@ -246,7 +248,7 @@ decode で重要なのは「frame を decode すること」より「canvas に�
 - `src/decoder/animation.rs`
 - `src/decoder/header.rs`
 
-現状の encoder は still image のみで、animation encode は未実装です。
+encoder は still image のみで、animation encode は未実装です。
 
 ## 8. Metadata (`EXIF`, `XMP `, `ICCP`)
 
