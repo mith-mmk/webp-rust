@@ -141,10 +141,14 @@ cargo run --example bmp2webp -- --lossy --quality 90 -z 9 input.bmp output.webp
 cargo test --tests
 cargo test --tests --features legacy
 cargo run --example webp_bench
+cargo run --example webp_compare
 ```
 
 `webp_bench` writes temporary BMP/WebP files only below `.test-webp-bench`
 and compares the Rust encoder with `cwebp` when it is available on `PATH`.
+`webp_compare` emits CSV rows for lossless `z_level` and lossy quality/method
+settings, including per-image and average compressed size, compression ratio,
+RGB PSNR, and encode time.
 
 ## License
 
