@@ -463,7 +463,7 @@ fn get_large_value(br: &mut Vp8BoolDecoder<'_>, p: &[u8; 11]) -> i32 {
             }
             value = value + value + br.get_bit(prob) as i32;
         }
-        value + 3 + (8 << cat) as i32
+        value + 3 + (8 << cat)
     }
 }
 
@@ -642,7 +642,20 @@ fn parse_residuals(
     }
 }
 
-pub fn parse_lossy_headers(data: &[u8]) -> Result<LossyHeader, DecoderError> {
+struct LossyPrefix<'a> {
+    frame: Vp8FrameHeader,
+    picture: Vp8PictureHeader,
+    macroblock_width: usize,
+    macroblock_height: usize,
+    segment: SegmentHeader,
+    filter: FilterHeader,
+    token_partition_sizes: Vec<usize>,
+    quantization: Quantization,
+    partition0_end: usize,
+    br: Vp8BoolDecoder<'a>,
+}
+
+fn parse_lossy_prefix(data: &[u8]) -> Result<LossyPrefix<'_>, DecoderError> {
     if data.len() < VP8_FRAME_HEADER_SIZE {
         return Err(DecoderError::NotEnoughData("VP8 frame header"));
     }
@@ -680,7 +693,9 @@ pub fn parse_lossy_headers(data: &[u8]) -> Result<LossyHeader, DecoderError> {
     }
 
     let partition0_offset = VP8_FRAME_HEADER_SIZE;
-    let partition0_end = partition0_offset + frame.partition_length;
+    let partition0_end = partition0_offset
+        .checked_add(frame.partition_length)
+        .ok_or(DecoderError::Bitstream("VP8 partition length overflow"))?;
     if partition0_end > data.len() {
         return Err(DecoderError::NotEnoughData("VP8 partition 0"));
     }
@@ -695,9 +710,8 @@ pub fn parse_lossy_headers(data: &[u8]) -> Result<LossyHeader, DecoderError> {
     let token_partition_sizes = parse_token_partitions(&mut br, &data[partition0_end..])?;
     let quantization = parse_quantization(&mut br, &segment)?;
     let _ = br.get();
-    let probabilities = parse_probability_updates(&mut br)?;
 
-    Ok(LossyHeader {
+    Ok(LossyPrefix {
         frame,
         picture,
         macroblock_width: (picture.width as usize + 15) >> 4,
@@ -706,35 +720,48 @@ pub fn parse_lossy_headers(data: &[u8]) -> Result<LossyHeader, DecoderError> {
         filter,
         token_partition_sizes,
         quantization,
-        probabilities,
+        partition0_end,
+        br,
     })
 }
 
+fn finish_lossy_header(
+    prefix: &LossyPrefix<'_>,
+    probabilities: ProbabilityUpdateSummary,
+) -> LossyHeader {
+    LossyHeader {
+        frame: prefix.frame,
+        picture: prefix.picture,
+        macroblock_width: prefix.macroblock_width,
+        macroblock_height: prefix.macroblock_height,
+        segment: prefix.segment,
+        filter: prefix.filter,
+        token_partition_sizes: prefix.token_partition_sizes.clone(),
+        quantization: prefix.quantization.clone(),
+        probabilities,
+    }
+}
+
+pub fn parse_lossy_headers(data: &[u8]) -> Result<LossyHeader, DecoderError> {
+    let mut prefix = parse_lossy_prefix(data)?;
+    let probabilities = parse_probability_updates(&mut prefix.br)?;
+    Ok(finish_lossy_header(&prefix, probabilities))
+}
+
 pub fn parse_macroblock_headers(data: &[u8]) -> Result<MacroBlockHeaders, DecoderError> {
-    let frame = parse_lossy_headers(data)?;
-
-    let partition0_offset = VP8_FRAME_HEADER_SIZE;
-    let partition0_end = partition0_offset + frame.frame.partition_length;
-    let mut br = Vp8BoolDecoder::new(&data[partition0_offset..partition0_end]);
-
-    let _ = br.get();
-    let _ = br.get();
-    let segment = parse_segment_header(&mut br)?;
-    let _ = parse_filter_header(&mut br)?;
-    let _ = parse_token_partitions(&mut br, &data[partition0_end..])?;
-    let _ = parse_quantization(&mut br, &segment)?;
-    let _ = br.get();
-    let probabilities = parse_probability_updates(&mut br)?;
+    let mut prefix = parse_lossy_prefix(data)?;
+    let probabilities = parse_probability_updates(&mut prefix.br)?;
+    let frame = finish_lossy_header(&prefix, probabilities);
 
     let mut top_modes = vec![B_DC_PRED; frame.macroblock_width * 4];
     let mut macroblocks = Vec::with_capacity(frame.macroblock_width * frame.macroblock_height);
     for _mb_y in 0..frame.macroblock_height {
         let mut left_modes = [B_DC_PRED; 4];
         let row = parse_intra_mode_row(
-            &mut br,
+            &mut prefix.br,
             frame.macroblock_width,
-            segment.update_map,
-            &segment.segment_probs,
+            frame.segment.update_map,
+            &frame.segment.segment_probs,
             probabilities.use_skip_probability,
             probabilities.skip_probability.unwrap_or(0),
             &mut top_modes,
@@ -746,62 +773,99 @@ pub fn parse_macroblock_headers(data: &[u8]) -> Result<MacroBlockHeaders, Decode
     Ok(MacroBlockHeaders { frame, macroblocks })
 }
 
-pub fn parse_macroblock_data(data: &[u8]) -> Result<MacroBlockDataFrame, DecoderError> {
-    let frame = parse_lossy_headers(data)?;
-    let partition0_offset = VP8_FRAME_HEADER_SIZE;
-    let partition0_end = partition0_offset + frame.frame.partition_length;
-    let mut br = Vp8BoolDecoder::new(&data[partition0_offset..partition0_end]);
+pub(crate) struct MacroBlockRows<'a> {
+    frame: LossyHeader,
+    br: Vp8BoolDecoder<'a>,
+    token_readers: Vec<Vp8BoolDecoder<'a>>,
+    probabilities: ProbabilityTables,
+    top_modes: Vec<u8>,
+    top_contexts: Vec<NonZeroContext>,
+    next_mb_y: usize,
+}
 
-    let _ = br.get();
-    let _ = br.get();
-    let segment = parse_segment_header(&mut br)?;
-    let _ = parse_filter_header(&mut br)?;
-    let token_partition_sizes = parse_token_partitions(&mut br, &data[partition0_end..])?;
-    let quantization = parse_quantization(&mut br, &segment)?;
-    let _ = br.get();
-    let probabilities = parse_probability_tables(&mut br)?;
+impl<'a> MacroBlockRows<'a> {
+    pub(crate) fn new(data: &'a [u8]) -> Result<Self, DecoderError> {
+        let mut prefix = parse_lossy_prefix(data)?;
+        let probabilities = parse_probability_tables(&mut prefix.br)?;
+        let frame = finish_lossy_header(&prefix, probabilities.summary);
+        let partition_size_bytes = (prefix.token_partition_sizes.len() - 1) * 3;
+        let mut token_offset = prefix
+            .partition0_end
+            .checked_add(partition_size_bytes)
+            .ok_or(DecoderError::Bitstream(
+                "VP8 token partition offset overflow",
+            ))?;
+        let mut token_readers = Vec::with_capacity(prefix.token_partition_sizes.len());
+        for size in &prefix.token_partition_sizes {
+            let end = token_offset
+                .checked_add(*size)
+                .ok_or(DecoderError::Bitstream("VP8 token partition size overflow"))?;
+            let partition = data
+                .get(token_offset..end)
+                .ok_or(DecoderError::NotEnoughData("VP8 token partition"))?;
+            token_readers.push(Vp8BoolDecoder::new(partition));
+            token_offset = end;
+        }
 
-    let partition_size_bytes = (token_partition_sizes.len() - 1) * 3;
-    let mut token_offset = partition0_end + partition_size_bytes;
-    let mut token_readers = Vec::with_capacity(token_partition_sizes.len());
-    for size in &token_partition_sizes {
-        let end = token_offset + *size;
-        token_readers.push(Vp8BoolDecoder::new(&data[token_offset..end]));
-        token_offset = end;
+        Ok(Self {
+            top_modes: vec![B_DC_PRED; frame.macroblock_width * 4],
+            top_contexts: vec![NonZeroContext::default(); frame.macroblock_width],
+            frame,
+            br: prefix.br,
+            token_readers,
+            probabilities,
+            next_mb_y: 0,
+        })
     }
 
-    let mut top_modes = vec![B_DC_PRED; frame.macroblock_width * 4];
-    let mut top_contexts = vec![NonZeroContext::default(); frame.macroblock_width];
-    let part_mask = token_readers.len() - 1;
-    let mut macroblocks = Vec::with_capacity(frame.macroblock_width * frame.macroblock_height);
+    pub(crate) fn frame(&self) -> &LossyHeader {
+        &self.frame
+    }
 
-    for mb_y in 0..frame.macroblock_height {
+    pub(crate) fn next_row(&mut self) -> Result<Option<Vec<MacroBlockData>>, DecoderError> {
+        if self.next_mb_y == self.frame.macroblock_height {
+            return Ok(None);
+        }
+
+        let mb_y = self.next_mb_y;
         let mut left_modes = [B_DC_PRED; 4];
         let row = parse_intra_mode_row(
-            &mut br,
-            frame.macroblock_width,
-            segment.update_map,
-            &segment.segment_probs,
-            probabilities.summary.use_skip_probability,
-            probabilities.summary.skip_probability.unwrap_or(0),
-            &mut top_modes,
+            &mut self.br,
+            self.frame.macroblock_width,
+            self.frame.segment.update_map,
+            &self.frame.segment.segment_probs,
+            self.probabilities.summary.use_skip_probability,
+            self.probabilities.summary.skip_probability.unwrap_or(0),
+            &mut self.top_modes,
             &mut left_modes,
         )?;
 
-        let token_br = &mut token_readers[mb_y & part_mask];
+        let part_mask = self.token_readers.len() - 1;
+        let token_br = &mut self.token_readers[mb_y & part_mask];
         let mut left_context = NonZeroContext::default();
+        let mut macroblocks = Vec::with_capacity(self.frame.macroblock_width);
         for (mb_x, header) in row.into_iter().enumerate() {
             let mb = parse_residuals(
                 header,
-                &mut top_contexts[mb_x],
+                &mut self.top_contexts[mb_x],
                 &mut left_context,
                 token_br,
-                &quantization,
-                &probabilities,
+                &self.frame.quantization,
+                &self.probabilities,
             );
             macroblocks.push(mb);
         }
+        self.next_mb_y += 1;
+        Ok(Some(macroblocks))
     }
+}
 
+pub fn parse_macroblock_data(data: &[u8]) -> Result<MacroBlockDataFrame, DecoderError> {
+    let mut rows = MacroBlockRows::new(data)?;
+    let frame = rows.frame().clone();
+    let mut macroblocks = Vec::with_capacity(frame.macroblock_width * frame.macroblock_height);
+    while let Some(row) = rows.next_row()? {
+        macroblocks.extend(row);
+    }
     Ok(MacroBlockDataFrame { frame, macroblocks })
 }

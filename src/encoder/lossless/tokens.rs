@@ -3,6 +3,8 @@
 use super::entropy::*;
 use super::*;
 
+type PendingMatch = Reverse<(usize, usize, usize, usize, usize)>;
+
 /// Finds match length.
 pub(super) fn find_match_length(
     argb: &[u32],
@@ -175,7 +177,7 @@ pub(super) fn build_window_offsets(width: usize, max_plane_codes: usize) -> Vec<
     let mut by_plane_code = vec![0usize; max_plane_codes];
     for y in 0..=radius {
         for x in -radius..=radius {
-            let offset = y as isize * width as isize + x;
+            let offset = y * width as isize + x;
             if offset <= 0 {
                 continue;
             }
@@ -724,7 +726,7 @@ pub(super) fn build_tokens_with_traceback(
     } else {
         Vec::new()
     };
-    let mut pending: BinaryHeap<Reverse<(usize, usize, usize, usize, usize)>> = BinaryHeap::new();
+    let mut pending: BinaryHeap<PendingMatch> = BinaryHeap::new();
     let mut active: BinaryHeap<Reverse<(usize, usize, usize, usize)>> = BinaryHeap::new();
 
     best_costs[0] = 0;

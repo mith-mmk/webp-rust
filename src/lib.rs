@@ -9,6 +9,7 @@
 //! Lower-level codec and container entry points remain available under
 //! [`decoder`] and [`encoder`].
 
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 pub mod compat;

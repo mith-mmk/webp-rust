@@ -45,13 +45,10 @@ impl BitReader {
     }
 
     fn skip_bits(&mut self, size: usize) {
-        if self.left_bits > size {
-            self.left_bits -= size;
-        } else if self.look_bits(size).is_ok() && self.left_bits >= size {
-            self.left_bits -= size;
-        } else {
-            self.left_bits = 0;
+        if self.left_bits <= size {
+            let _ = self.look_bits(size);
         }
+        self.left_bits = self.left_bits.saturating_sub(size);
     }
 
     fn get_bits(&mut self, size: usize) -> Result<usize, Error> {
@@ -166,6 +163,12 @@ impl WebpHeader {
     }
 }
 
+impl Default for WebpHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Reads a 24-bit little-endian integer from a [`BinaryReader`].
 pub fn read_u24<B: BinaryReader>(reader: &mut B) -> Result<u32, Error> {
     let mut b = [0_u8; 3];
@@ -201,6 +204,7 @@ fn parse_animation_frame_payload(data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>
 }
 
 /// Parses the RIFF container and returns raw chunk-oriented metadata.
+#[allow(clippy::collapsible_match)]
 pub fn read_header<B: BinaryReader>(reader: &mut B) -> Result<WebpHeader, Error> {
     let riff = reader.read_ascii_string(4)?;
     if riff != "RIFF" {

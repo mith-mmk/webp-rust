@@ -496,7 +496,7 @@ pub(super) fn build_entropy_seed_histograms(
 ) -> Vec<HistogramSet> {
     let mut candidates =
         entropy_histogram_candidates(non_empty_tiles, tile_histograms, group_count);
-    candidates.sort_by(|lhs, rhs| rhs.weight.cmp(&lhs.weight));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.weight));
     candidates
         .into_iter()
         .take(group_count)
@@ -699,7 +699,7 @@ pub(super) fn build_meta_huffman_plan(
     if non_empty_tiles.len() <= 1 {
         return Ok(None);
     }
-    non_empty_tiles.sort_by(|lhs, rhs| rhs.1.cmp(&lhs.1));
+    non_empty_tiles.sort_by_key(|&(_, weight)| std::cmp::Reverse(weight));
 
     let group_count = max_groups.min(non_empty_tiles.len());
     if group_count <= 1 {
@@ -797,6 +797,7 @@ pub(super) fn write_tokens_with_meta(
 }
 
 /// Writes tokens.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_tokens(
     bw: &mut BitWriter,
     tokens: &[Token],

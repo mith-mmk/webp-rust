@@ -112,9 +112,9 @@ fn main() -> Result<(), Error> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("_testdata/sample.webp"));
     let output = args.next().map(PathBuf::from).unwrap_or_else(|| {
-        if input == PathBuf::from("_testdata/sample.webp") {
+        if input == Path::new("_testdata/sample.webp") {
             PathBuf::from("target/sample.bmp")
-        } else if input == PathBuf::from("_testdata/sample_animation.webp") {
+        } else if input == Path::new("_testdata/sample_animation.webp") {
             PathBuf::from("target/sample_animation")
         } else {
             default_output_path(&input)

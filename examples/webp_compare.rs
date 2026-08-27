@@ -6,7 +6,7 @@
 //! --keep.
 
 use std::fs;
-use std::io::{Error as IoError, ErrorKind, Result as IoResult};
+use std::io::{Error as IoError, Result as IoResult};
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -100,8 +100,7 @@ fn psnr(source: &[u8], decoded: &[u8]) -> f64 {
 }
 
 fn measure(encoded: Vec<u8>, source: &[u8], started: Instant) -> IoResult<Measurement> {
-    let decoded =
-        decode(&encoded).map_err(|error| IoError::new(ErrorKind::Other, error.to_string()))?;
+    let decoded = decode(&encoded).map_err(|error| IoError::other(error.to_string()))?;
     Ok(Measurement {
         encoded_size: encoded.len(),
         psnr: psnr(source, &decoded.rgba),
@@ -201,7 +200,7 @@ fn compare_lossless(
                 rgba,
                 &LosslessEncodingConfig { z_level },
             )
-            .map_err(|error| IoError::new(ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| IoError::other(error.to_string()))?;
             let measurement = measure(encoded, rgba, started)?;
             print_row(
                 "sample",
@@ -261,7 +260,7 @@ fn compare_lossy(
                 };
                 let started = Instant::now();
                 let encoded = encode_lossy_rgba_to_webp_with_config(WIDTH, HEIGHT, rgba, &config)
-                    .map_err(|error| IoError::new(ErrorKind::Other, error.to_string()))?;
+                    .map_err(|error| IoError::other(error.to_string()))?;
                 let measurement = measure(encoded, rgba, started)?;
                 print_row(
                     "sample",

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! Partition, coefficient, and mode bitstream helpers for lossy encoding.
 
 use super::predict::*;
@@ -83,13 +85,13 @@ pub(super) fn intra4_mode_rate(top_mode: u8, left_mode: u8, mode: u8) -> u32 {
 /// Updates mode cache.
 pub(super) fn update_mode_cache(mode: &MacroblockMode, top: &mut [u8], left: &mut [u8; 4]) {
     if mode.luma == B_PRED {
-        for sub_y in 0..4 {
-            let mut ymode = left[sub_y];
-            for sub_x in 0..4 {
+        for (sub_y, left_mode) in left.iter_mut().enumerate() {
+            let mut ymode = *left_mode;
+            for (sub_x, top_mode) in top.iter_mut().enumerate().take(4) {
                 ymode = mode.sub_luma[sub_y * 4 + sub_x];
-                top[sub_x] = ymode;
+                *top_mode = ymode;
             }
-            left[sub_y] = ymode;
+            *left_mode = ymode;
         }
     } else {
         top.fill(mode.luma);
@@ -98,12 +100,12 @@ pub(super) fn update_mode_cache(mode: &MacroblockMode, top: &mut [u8], left: &mu
 }
 
 /// Internal helper for coeff probs.
-pub(super) fn coeff_probs<'a>(
-    probabilities: &'a CoeffProbTables,
+pub(super) fn coeff_probs(
+    probabilities: &CoeffProbTables,
     coeff_type: usize,
     coeff_index: usize,
     ctx: usize,
-) -> &'a [u8; 11] {
+) -> &[u8; 11] {
     &probabilities[coeff_type][BANDS[coeff_index]][ctx]
 }
 
@@ -568,15 +570,15 @@ pub(super) fn encode_partition0(
         let top = &mut top_modes[mb_x * 4..mb_x * 4 + 4];
         if mode.luma == B_PRED {
             writer.put_bit(false, 145);
-            for sub_y in 0..4 {
-                let mut ymode = left_modes[sub_y];
-                for sub_x in 0..4 {
+            for (sub_y, left_mode) in left_modes.iter_mut().enumerate() {
+                let mut ymode = *left_mode;
+                for (sub_x, top_mode) in top.iter_mut().enumerate().take(4) {
                     let sub_mode = mode.sub_luma[sub_y * 4 + sub_x];
-                    encode_intra4_mode(&mut writer, top[sub_x], ymode, sub_mode);
-                    top[sub_x] = sub_mode;
+                    encode_intra4_mode(&mut writer, *top_mode, ymode, sub_mode);
+                    *top_mode = sub_mode;
                     ymode = sub_mode;
                 }
-                left_modes[sub_y] = ymode;
+                *left_mode = ymode;
             }
         } else {
             writer.put_bit(true, 145);
@@ -1093,7 +1095,7 @@ pub(super) fn encode_token_partition(
                 mb_y,
                 profile,
                 quant,
-                &rd,
+                rd,
                 probabilities,
                 &top_contexts[mb_x],
                 &left_context,

@@ -69,11 +69,7 @@ pub(crate) fn encode_alpha_payload(
     rgba: &[u8],
     config: &LossyEncodingConfig,
 ) -> Result<Vec<u8>, EncoderError> {
-    let filter = match config.alpha_filter {
-        AlphaFilter::None => AlphaFilter::None,
-        AlphaFilter::Fast => AlphaFilter::Fast,
-        AlphaFilter::Best => AlphaFilter::Best,
-    };
+    let filter = config.alpha_filter;
     let filtered = filtered_alpha(width, height, rgba, filter, config.alpha_quality);
     let filter_bits = match filter {
         AlphaFilter::None => 0,

@@ -34,23 +34,12 @@ pub struct QuantIndices {
     pub uv_ac_delta: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuantMatrix {
     pub y1: [u16; 2],
     pub y2: [u16; 2],
     pub uv: [u16; 2],
     pub uv_quant: i32,
-}
-
-impl Default for QuantMatrix {
-    fn default() -> Self {
-        Self {
-            y1: [0; 2],
-            y2: [0; 2],
-            uv: [0; 2],
-            uv_quant: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

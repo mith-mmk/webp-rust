@@ -2,7 +2,7 @@
 
 use crate::decoder::alpha::{apply_alpha_plane, decode_alpha_plane};
 use crate::decoder::header::parse_still_webp;
-use crate::decoder::vp8::{parse_macroblock_data, FilterType, MacroBlockData, MacroBlockDataFrame};
+use crate::decoder::vp8::{FilterType, LossyHeader, MacroBlockData, MacroBlockRows};
 use crate::decoder::vp8i::{
     WebpFormat, B_DC_PRED, B_HD_PRED, B_HE_PRED, B_HU_PRED, B_LD_PRED, B_RD_PRED, B_TM_PRED,
     B_VE_PRED, B_VL_PRED, B_VR_PRED, DC_PRED, H_PRED, TM_PRED, V_PRED,
@@ -21,7 +21,22 @@ const RGB_R_BIAS: i32 = 14_234;
 const RGB_G_BIAS: i32 = 8_708;
 const RGB_B_BIAS: i32 = 17_685;
 const YUV_FIX2: i32 = 6;
-const YUV_MASK2: i32 = (256 << YUV_FIX2) - 1;
+
+const fn make_color_table(coeff: i32) -> [i32; 256] {
+    let mut table = [0i32; 256];
+    let mut value = 0usize;
+    while value < table.len() {
+        table[value] = (value as i32 * coeff) >> 8;
+        value += 1;
+    }
+    table
+}
+
+const Y_TO_RGB: [i32; 256] = make_color_table(RGB_Y_COEFF);
+const V_TO_R: [i32; 256] = make_color_table(RGB_V_TO_R_COEFF);
+const U_TO_G: [i32; 256] = make_color_table(RGB_U_TO_G_COEFF);
+const V_TO_G: [i32; 256] = make_color_table(RGB_V_TO_G_COEFF);
+const U_TO_B: [i32; 256] = make_color_table(RGB_U_TO_B_COEFF);
 
 /// Decoded RGBA image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,14 +79,14 @@ struct Planes {
 }
 
 impl Planes {
-    fn new(frame: &MacroBlockDataFrame) -> Self {
-        let y_stride = frame.frame.macroblock_width * 16;
-        let uv_stride = frame.frame.macroblock_width * 8;
-        let height = frame.frame.macroblock_height * 16;
-        let uv_height = frame.frame.macroblock_height * 8;
+    fn new(frame: &LossyHeader) -> Self {
+        let y_stride = frame.macroblock_width * 16;
+        let uv_stride = frame.macroblock_width * 8;
+        let height = frame.macroblock_height * 16;
+        let uv_height = frame.macroblock_height * 8;
         Self {
-            width: frame.frame.picture.width as usize,
-            height: frame.frame.picture.height as usize,
+            width: frame.picture.width as usize,
+            height: frame.picture.height as usize,
             y_stride,
             uv_stride,
             y: vec![0; y_stride * height],
@@ -95,6 +110,23 @@ struct FilterInfo {
     f_ilevel: u8,
     f_inner: bool,
     hev_thresh: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MacroBlockFilterMetadata {
+    segment: u8,
+    is_i4x4: bool,
+    has_non_zero: bool,
+}
+
+impl From<&MacroBlockData> for MacroBlockFilterMetadata {
+    fn from(macroblock: &MacroBlockData) -> Self {
+        Self {
+            segment: macroblock.header.segment,
+            is_i4x4: macroblock.header.is_i4x4,
+            has_non_zero: (macroblock.non_zero_y | macroblock.non_zero_uv) != 0,
+        }
+    }
 }
 
 fn abs_diff(a: u8, b: u8) -> i32 {
@@ -225,6 +257,7 @@ fn simple_h_filter16i(plane: &mut [u8], mut pos: usize, stride: usize, thresh: i
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_loop26(
     plane: &mut [u8],
     mut pos: usize,
@@ -248,6 +281,7 @@ fn filter_loop26(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn filter_loop24(
     plane: &mut [u8],
     mut pos: usize,
@@ -410,17 +444,17 @@ fn h_filter8i(
 }
 
 fn macroblock_filter_info(
-    frame: &MacroBlockDataFrame,
-    macroblock: &MacroBlockData,
+    frame: &LossyHeader,
+    macroblock: MacroBlockFilterMetadata,
 ) -> Option<FilterInfo> {
-    let filter = &frame.frame.filter;
+    let filter = &frame.filter;
     if filter.filter_type == FilterType::Off {
         return None;
     }
 
-    let segment = &frame.frame.segment;
+    let segment = &frame.segment;
     let mut base_level = if segment.use_segment {
-        let level = segment.filter_strength[macroblock.header.segment as usize] as i32;
+        let level = segment.filter_strength[macroblock.segment as usize] as i32;
         if segment.absolute_delta {
             level
         } else {
@@ -432,7 +466,7 @@ fn macroblock_filter_info(
 
     if filter.use_lf_delta {
         base_level += filter.ref_lf_delta[0] as i32;
-        if macroblock.header.is_i4x4 {
+        if macroblock.is_i4x4 {
             base_level += filter.mode_lf_delta[0] as i32;
         }
     }
@@ -458,7 +492,7 @@ fn macroblock_filter_info(
     Some(FilterInfo {
         f_limit: (2 * level + ilevel) as u8,
         f_ilevel: ilevel as u8,
-        f_inner: macroblock.header.is_i4x4 || (macroblock.non_zero_y | macroblock.non_zero_uv) != 0,
+        f_inner: macroblock.is_i4x4 || macroblock.has_non_zero,
         hev_thresh: if level >= 40 {
             2
         } else if level >= 15 {
@@ -470,11 +504,11 @@ fn macroblock_filter_info(
 }
 
 fn filter_macroblock(
-    frame: &MacroBlockDataFrame,
+    frame: &LossyHeader,
     planes: &mut Planes,
     mb_x: usize,
     mb_y: usize,
-    macroblock: &MacroBlockData,
+    macroblock: MacroBlockFilterMetadata,
 ) {
     let Some(info) = macroblock_filter_info(frame, macroblock) else {
         return;
@@ -486,7 +520,7 @@ fn filter_macroblock(
     let inner = info.f_ilevel as i32;
     let hev = info.hev_thresh as i32;
 
-    match frame.frame.filter.filter_type {
+    match frame.filter.filter_type {
         FilterType::Off => {}
         FilterType::Simple => {
             if mb_x > 0 {
@@ -555,14 +589,18 @@ fn filter_macroblock(
     }
 }
 
-fn apply_loop_filter(frame: &MacroBlockDataFrame, planes: &mut Planes) {
-    if frame.frame.filter.filter_type == FilterType::Off {
+fn apply_loop_filter(
+    frame: &LossyHeader,
+    macroblocks: &[MacroBlockFilterMetadata],
+    planes: &mut Planes,
+) {
+    if frame.filter.filter_type == FilterType::Off {
         return;
     }
 
-    for mb_y in 0..frame.frame.macroblock_height {
-        for mb_x in 0..frame.frame.macroblock_width {
-            let macroblock = &frame.macroblocks[mb_y * frame.frame.macroblock_width + mb_x];
+    for mb_y in 0..frame.macroblock_height {
+        for mb_x in 0..frame.macroblock_width {
+            let macroblock = macroblocks[mb_y * frame.macroblock_width + mb_x];
             filter_macroblock(frame, planes, mb_x, mb_y, macroblock);
         }
     }
@@ -687,33 +725,20 @@ fn fill_block(
     }
 }
 
-fn predict_true_motion(
+fn predict_true_motion<const N: usize>(
     plane: &mut [u8],
     stride: usize,
     plane_width: usize,
     x: usize,
     y: usize,
-    size: usize,
 ) {
-    let top = if size == 4 {
-        top_samples::<4>(plane, stride, plane_width, x, y).to_vec()
-    } else if size == 8 {
-        top_samples::<8>(plane, stride, plane_width, x, y).to_vec()
-    } else {
-        top_samples::<16>(plane, stride, plane_width, x, y).to_vec()
-    };
-    let left = if size == 4 {
-        left_samples::<4>(plane, stride, x, y).to_vec()
-    } else if size == 8 {
-        left_samples::<8>(plane, stride, x, y).to_vec()
-    } else {
-        left_samples::<16>(plane, stride, x, y).to_vec()
-    };
+    let top = top_samples::<N>(plane, stride, plane_width, x, y);
+    let left = left_samples::<N>(plane, stride, x, y);
     let top_left = top_left_sample(plane, stride, x, y) as i32;
-    for row in 0..size {
-        let left_value = left[row] as i32;
+    for (row, &left_value) in left.iter().enumerate() {
+        let left_value = left_value as i32;
         let offset = (y + row) * stride + x;
-        for col in 0..size {
+        for col in 0..N {
             plane[offset + col] = clip_byte(left_value + top[col] as i32 - top_left);
         }
     }
@@ -753,7 +778,7 @@ fn predict_luma16(
             };
             fill_block(plane, stride, x, y, 16, 16, value);
         }
-        TM_PRED => predict_true_motion(plane, stride, plane_width, x, y, 16),
+        TM_PRED => predict_true_motion::<16>(plane, stride, plane_width, x, y),
         V_PRED => {
             let top = top_samples::<16>(plane, stride, plane_width, x, y);
             for row in 0..16 {
@@ -807,7 +832,7 @@ fn predict_chroma8(
             };
             fill_block(plane, stride, x, y, 8, 8, value);
         }
-        TM_PRED => predict_true_motion(plane, stride, plane_width, x, y, 8),
+        TM_PRED => predict_true_motion::<8>(plane, stride, plane_width, x, y),
         V_PRED => {
             let top = top_samples::<8>(plane, stride, plane_width, x, y);
             for row in 0..8 {
@@ -1135,49 +1160,40 @@ fn reconstruct_macroblock(
     Ok(())
 }
 
-fn reconstruct_planes(frame: &MacroBlockDataFrame) -> Result<Planes, DecoderError> {
-    let expected = frame.frame.macroblock_width * frame.frame.macroblock_height;
-    if frame.macroblocks.len() != expected {
-        return Err(DecoderError::Bitstream("macroblock count mismatch"));
-    }
-
-    let mut planes = Planes::new(frame);
-    for mb_y in 0..frame.frame.macroblock_height {
-        for mb_x in 0..frame.frame.macroblock_width {
-            let macroblock = &frame.macroblocks[mb_y * frame.frame.macroblock_width + mb_x];
+fn reconstruct_planes(data: &[u8]) -> Result<Planes, DecoderError> {
+    let mut rows = MacroBlockRows::new(data)?;
+    let frame = rows.frame().clone();
+    let mut planes = Planes::new(&frame);
+    let mut filter_metadata = Vec::with_capacity(frame.macroblock_width * frame.macroblock_height);
+    let mut mb_y = 0usize;
+    while let Some(row) = rows.next_row()? {
+        for (mb_x, macroblock) in row.iter().enumerate() {
             reconstruct_macroblock(&mut planes, mb_x, mb_y, macroblock)?;
+            filter_metadata.push(MacroBlockFilterMetadata::from(macroblock));
         }
+        mb_y += 1;
     }
-    apply_loop_filter(frame, &mut planes);
+    apply_loop_filter(&frame, &filter_metadata, &mut planes);
     Ok(planes)
 }
 
-fn mult_hi(value: i32, coeff: i32) -> i32 {
-    (value * coeff) >> 8
-}
-
+#[inline(always)]
 fn clip_rgb(value: i32) -> u8 {
-    if (value & !YUV_MASK2) == 0 {
-        (value >> YUV_FIX2) as u8
-    } else if value < 0 {
-        0
-    } else {
-        255
-    }
+    (value >> YUV_FIX2).clamp(0, 255) as u8
 }
 
-fn write_rgba(yy: u8, u: i32, v: i32, dst: &mut [u8], offset: usize) {
-    let yy = yy as i32;
-    dst[offset] = clip_rgb(mult_hi(yy, RGB_Y_COEFF) + mult_hi(v, RGB_V_TO_R_COEFF) - RGB_R_BIAS);
-    dst[offset + 1] = clip_rgb(
-        mult_hi(yy, RGB_Y_COEFF) - mult_hi(u, RGB_U_TO_G_COEFF) - mult_hi(v, RGB_V_TO_G_COEFF)
-            + RGB_G_BIAS,
-    );
-    dst[offset + 2] =
-        clip_rgb(mult_hi(yy, RGB_Y_COEFF) + mult_hi(u, RGB_U_TO_B_COEFF) - RGB_B_BIAS);
-    dst[offset + 3] = 255;
+#[inline(always)]
+fn write_rgba(yy: u8, u: u8, v: u8, dst: &mut [u8]) {
+    let yy = Y_TO_RGB[yy as usize];
+    let u = u as usize;
+    let v = v as usize;
+    dst[0] = clip_rgb(yy + V_TO_R[v] - RGB_R_BIAS);
+    dst[1] = clip_rgb(yy - U_TO_G[u] - V_TO_G[v] + RGB_G_BIAS);
+    dst[2] = clip_rgb(yy + U_TO_B[u] - RGB_B_BIAS);
+    dst[3] = 255;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsample_rgba_line_pair(
     top_y: &[u8],
     bottom_y: Option<&[u8]>,
@@ -1196,13 +1212,18 @@ fn upsample_rgba_line_pair(
     let mut l_u = cur_u[0] as i32;
     let mut l_v = cur_v[0] as i32;
 
-    let uv0_u = (3 * tl_u + l_u + 2) >> 2;
-    let uv0_v = (3 * tl_v + l_v + 2) >> 2;
-    write_rgba(top_y[0], uv0_u, uv0_v, rgba, top_offset);
+    let uv0_u = ((3 * tl_u + l_u + 2) >> 2) as u8;
+    let uv0_v = ((3 * tl_v + l_v + 2) >> 2) as u8;
+    write_rgba(
+        top_y[0],
+        uv0_u,
+        uv0_v,
+        &mut rgba[top_offset..top_offset + 4],
+    );
     if let (Some(row), Some(offset)) = (bottom_y, bottom_offset) {
-        let uv0_u = (3 * l_u + tl_u + 2) >> 2;
-        let uv0_v = (3 * l_v + tl_v + 2) >> 2;
-        write_rgba(row[0], uv0_u, uv0_v, rgba, offset);
+        let uv0_u = ((3 * l_u + tl_u + 2) >> 2) as u8;
+        let uv0_v = ((3 * l_v + tl_v + 2) >> 2) as u8;
+        write_rgba(row[0], uv0_u, uv0_v, &mut rgba[offset..offset + 4]);
     }
 
     for x in 1..=last_pixel_pair {
@@ -1222,33 +1243,29 @@ fn upsample_rgba_line_pair(
         let top_right = 2 * x * 4;
         write_rgba(
             top_y[2 * x - 1],
-            (diag_12_u + tl_u) >> 1,
-            (diag_12_v + tl_v) >> 1,
-            rgba,
-            top_offset + top_left,
+            ((diag_12_u + tl_u) >> 1) as u8,
+            ((diag_12_v + tl_v) >> 1) as u8,
+            &mut rgba[top_offset + top_left..top_offset + top_left + 4],
         );
         write_rgba(
             top_y[2 * x],
-            (diag_03_u + t_u) >> 1,
-            (diag_03_v + t_v) >> 1,
-            rgba,
-            top_offset + top_right,
+            ((diag_03_u + t_u) >> 1) as u8,
+            ((diag_03_v + t_v) >> 1) as u8,
+            &mut rgba[top_offset + top_right..top_offset + top_right + 4],
         );
 
         if let (Some(row), Some(offset)) = (bottom_y, bottom_offset) {
             write_rgba(
                 row[2 * x - 1],
-                (diag_03_u + l_u) >> 1,
-                (diag_03_v + l_v) >> 1,
-                rgba,
-                offset + top_left,
+                ((diag_03_u + l_u) >> 1) as u8,
+                ((diag_03_v + l_v) >> 1) as u8,
+                &mut rgba[offset + top_left..offset + top_left + 4],
             );
             write_rgba(
                 row[2 * x],
-                (diag_12_u + u) >> 1,
-                (diag_12_v + v) >> 1,
-                rgba,
-                offset + top_right,
+                ((diag_12_u + u) >> 1) as u8,
+                ((diag_12_v + v) >> 1) as u8,
+                &mut rgba[offset + top_right..offset + top_right + 4],
             );
         }
 
@@ -1260,14 +1277,130 @@ fn upsample_rgba_line_pair(
 
     if len & 1 == 0 {
         let last = (len - 1) * 4;
-        let uv0_u = (3 * tl_u + l_u + 2) >> 2;
-        let uv0_v = (3 * tl_v + l_v + 2) >> 2;
-        write_rgba(top_y[len - 1], uv0_u, uv0_v, rgba, top_offset + last);
+        let uv0_u = ((3 * tl_u + l_u + 2) >> 2) as u8;
+        let uv0_v = ((3 * tl_v + l_v + 2) >> 2) as u8;
+        write_rgba(
+            top_y[len - 1],
+            uv0_u,
+            uv0_v,
+            &mut rgba[top_offset + last..top_offset + last + 4],
+        );
         if let (Some(row), Some(offset)) = (bottom_y, bottom_offset) {
-            let uv0_u = (3 * l_u + tl_u + 2) >> 2;
-            let uv0_v = (3 * l_v + tl_v + 2) >> 2;
-            write_rgba(row[len - 1], uv0_u, uv0_v, rgba, offset + last);
+            let uv0_u = ((3 * l_u + tl_u + 2) >> 2) as u8;
+            let uv0_v = ((3 * l_v + tl_v + 2) >> 2) as u8;
+            write_rgba(
+                row[len - 1],
+                uv0_u,
+                uv0_v,
+                &mut rgba[offset + last..offset + last + 4],
+            );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsample_rgba_two_lines(
+    top_y: &[u8],
+    bottom_y: &[u8],
+    top_u: &[u8],
+    top_v: &[u8],
+    cur_u: &[u8],
+    cur_v: &[u8],
+    top_rgba: &mut [u8],
+    bottom_rgba: &mut [u8],
+) {
+    let mut top_pixels = top_rgba.chunks_exact_mut(4);
+    let mut bottom_pixels = bottom_rgba.chunks_exact_mut(4);
+    let mut top_luma = top_y.iter().copied();
+    let mut bottom_luma = bottom_y.iter().copied();
+    let mut tl_u = i32::from(top_u[0]);
+    let mut tl_v = i32::from(top_v[0]);
+    let mut l_u = i32::from(cur_u[0]);
+    let mut l_v = i32::from(cur_v[0]);
+
+    write_rgba(
+        top_luma.next().unwrap(),
+        ((3 * tl_u + l_u + 2) >> 2) as u8,
+        ((3 * tl_v + l_v + 2) >> 2) as u8,
+        top_pixels.next().unwrap(),
+    );
+    write_rgba(
+        bottom_luma.next().unwrap(),
+        ((3 * l_u + tl_u + 2) >> 2) as u8,
+        ((3 * l_v + tl_v + 2) >> 2) as u8,
+        bottom_pixels.next().unwrap(),
+    );
+
+    for (((&t_u, &t_v), &u), &v) in top_u[1..]
+        .iter()
+        .zip(&top_v[1..])
+        .zip(&cur_u[1..])
+        .zip(&cur_v[1..])
+    {
+        let t_u = i32::from(t_u);
+        let t_v = i32::from(t_v);
+        let u = i32::from(u);
+        let v = i32::from(v);
+        let avg_u = tl_u + t_u + l_u + u + 8;
+        let avg_v = tl_v + t_v + l_v + v + 8;
+        let diag_12_u = (avg_u + 2 * (t_u + l_u)) >> 3;
+        let diag_12_v = (avg_v + 2 * (t_v + l_v)) >> 3;
+        let diag_03_u = (avg_u + 2 * (tl_u + u)) >> 3;
+        let diag_03_v = (avg_v + 2 * (tl_v + v)) >> 3;
+
+        write_rgba(
+            top_luma.next().unwrap(),
+            ((diag_12_u + tl_u) >> 1) as u8,
+            ((diag_12_v + tl_v) >> 1) as u8,
+            top_pixels.next().unwrap(),
+        );
+        if let (Some(yy), Some(dst)) = (top_luma.next(), top_pixels.next()) {
+            write_rgba(
+                yy,
+                ((diag_03_u + t_u) >> 1) as u8,
+                ((diag_03_v + t_v) >> 1) as u8,
+                dst,
+            );
+        }
+        write_rgba(
+            bottom_luma.next().unwrap(),
+            ((diag_03_u + l_u) >> 1) as u8,
+            ((diag_03_v + l_v) >> 1) as u8,
+            bottom_pixels.next().unwrap(),
+        );
+        if let (Some(yy), Some(dst)) = (bottom_luma.next(), bottom_pixels.next()) {
+            write_rgba(
+                yy,
+                ((diag_12_u + u) >> 1) as u8,
+                ((diag_12_v + v) >> 1) as u8,
+                dst,
+            );
+        }
+
+        tl_u = t_u;
+        tl_v = t_v;
+        l_u = u;
+        l_v = v;
+    }
+
+    if let (Some(top_yy), Some(top_dst), Some(bottom_yy), Some(bottom_dst)) = (
+        top_luma.next(),
+        top_pixels.next(),
+        bottom_luma.next(),
+        bottom_pixels.next(),
+    ) {
+        write_rgba(
+            top_yy,
+            ((3 * tl_u + l_u + 2) >> 2) as u8,
+            ((3 * tl_v + l_v + 2) >> 2) as u8,
+            top_dst,
+        );
+        write_rgba(
+            bottom_yy,
+            ((3 * l_u + tl_u + 2) >> 2) as u8,
+            ((3 * l_v + tl_v + 2) >> 2) as u8,
+            bottom_dst,
+        );
     }
 }
 
@@ -1311,17 +1444,18 @@ fn yuv_to_rgba_fancy(planes: &Planes) -> Vec<u8> {
             &planes.v[(uv_row - 1) * planes.uv_stride..(uv_row - 1) * planes.uv_stride + uv_width];
         let cur_u = &planes.u[uv_row * planes.uv_stride..uv_row * planes.uv_stride + uv_width];
         let cur_v = &planes.v[uv_row * planes.uv_stride..uv_row * planes.uv_stride + uv_width];
-        upsample_rgba_line_pair(
+        let bottom_offset = bottom_row * planes.width * 4;
+        let (top_output, bottom_output) = rgba.split_at_mut(bottom_offset);
+        let top_offset = top_row * planes.width * 4;
+        upsample_rgba_two_lines(
             top_y,
-            Some(bottom_y),
+            bottom_y,
             prev_u,
             prev_v,
             cur_u,
             cur_v,
-            &mut rgba,
-            top_row * planes.width * 4,
-            Some(bottom_row * planes.width * 4),
-            planes.width,
+            &mut top_output[top_offset..bottom_offset],
+            &mut bottom_output[..planes.width * 4],
         );
     }
 
@@ -1363,26 +1497,17 @@ fn into_decoded_yuv(planes: Planes) -> DecodedYuvImage {
 
 /// Decodes a raw `VP8 ` frame payload to planar YUV420.
 pub fn decode_lossy_vp8_to_yuv(data: &[u8]) -> Result<DecodedYuvImage, DecoderError> {
-    let frame = parse_macroblock_data(data)?;
-    let planes = reconstruct_planes(&frame)?;
+    let planes = reconstruct_planes(data)?;
     Ok(into_decoded_yuv(planes))
 }
 
 /// Decodes a raw `VP8 ` frame payload to RGBA.
 pub fn decode_lossy_vp8_to_rgba(data: &[u8]) -> Result<DecodedImage, DecoderError> {
-    let yuv = decode_lossy_vp8_to_yuv(data)?;
+    let planes = reconstruct_planes(data)?;
     Ok(DecodedImage {
-        width: yuv.width,
-        height: yuv.height,
-        rgba: yuv_to_rgba_fancy(&Planes {
-            width: yuv.width,
-            height: yuv.height,
-            y_stride: yuv.y_stride,
-            uv_stride: yuv.uv_stride,
-            y: yuv.y,
-            u: yuv.u,
-            v: yuv.v,
-        }),
+        width: planes.width,
+        height: planes.height,
+        rgba: yuv_to_rgba_fancy(&planes),
     })
 }
 

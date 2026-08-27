@@ -329,7 +329,7 @@ fn build_rd_multipliers(quant: &QuantMatrices) -> RdMultipliers {
     let q_i16 = u32::from(quant.y2[1].max(8));
     let q_uv = u32::from(quant.uv[1].max(8));
     RdMultipliers {
-        i16: ((3 * q_i16 * q_i16).max(128)) >> 0,
+        i16: (3 * q_i16 * q_i16).max(128),
         i4: ((3 * q_i4 * q_i4).max(128)) >> 7,
         uv: ((3 * q_uv * q_uv).max(128)) >> 6,
         mode: (q_i4 * q_i4).max(128) >> 7,
@@ -466,11 +466,7 @@ fn segment_with_uniform_filter(segment: &SegmentConfig, level: u8) -> SegmentCon
 /// Looks up a probability from a pair of neighboring context flags.
 fn get_proba(a: usize, b: usize) -> u8 {
     let total = a + b;
-    if total == 0 {
-        255
-    } else {
-        ((255 * a + total / 2) / total) as u8
-    }
+    (255 * a + total / 2).checked_div(total).unwrap_or(255) as u8
 }
 
 /// Builds segment quantizers.
@@ -717,7 +713,7 @@ fn build_multi_segment_config(
         counts[segment] += 1;
     }
 
-    if counts[..segment_count].iter().any(|&count| count == 0) {
+    if counts[..segment_count].contains(&0) {
         return None;
     }
 

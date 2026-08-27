@@ -49,9 +49,9 @@ fn fill_rect(
 ) {
     for y in 0..height {
         let row = ((y_offset + y) * canvas_width + x_offset) * 4;
-        for x in 0..width {
-            let dst = row + x * 4;
-            canvas[dst..dst + 4].copy_from_slice(&rgba);
+        let row = &mut canvas[row..row + width * 4];
+        for pixel in row.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&rgba);
         }
     }
 }
@@ -89,30 +89,44 @@ fn composite_frame(
     frame_rgba: &[u8],
     frame: &ParsedAnimationFrame<'_>,
 ) {
+    if !frame.blend {
+        for y in 0..frame.height {
+            let src = y * frame.width * 4;
+            let dst = ((frame.y_offset + y) * canvas_width + frame.x_offset) * 4;
+            let len = frame.width * 4;
+            canvas[dst..dst + len].copy_from_slice(&frame_rgba[src..src + len]);
+        }
+        return;
+    }
+
     for y in 0..frame.height {
         let src_row = y * frame.width * 4;
         let dst_row = ((frame.y_offset + y) * canvas_width + frame.x_offset) * 4;
         for x in 0..frame.width {
             let src = src_row + x * 4;
             let dst = dst_row + x * 4;
-            if frame.blend {
-                let src_pixel = [
-                    frame_rgba[src],
-                    frame_rgba[src + 1],
-                    frame_rgba[src + 2],
-                    frame_rgba[src + 3],
-                ];
-                let dst_pixel = [
-                    canvas[dst],
-                    canvas[dst + 1],
-                    canvas[dst + 2],
-                    canvas[dst + 3],
-                ];
-                let out = blend_pixel_non_premult(src_pixel, dst_pixel);
-                canvas[dst..dst + 4].copy_from_slice(&out);
-            } else {
-                canvas[dst..dst + 4].copy_from_slice(&frame_rgba[src..src + 4]);
+            let src_alpha = frame_rgba[src + 3];
+            if src_alpha == 0 {
+                continue;
             }
+            if src_alpha == 255 {
+                canvas[dst..dst + 4].copy_from_slice(&frame_rgba[src..src + 4]);
+                continue;
+            }
+            let src_pixel = [
+                frame_rgba[src],
+                frame_rgba[src + 1],
+                frame_rgba[src + 2],
+                src_alpha,
+            ];
+            let dst_pixel = [
+                canvas[dst],
+                canvas[dst + 1],
+                canvas[dst + 2],
+                canvas[dst + 3],
+            ];
+            let out = blend_pixel_non_premult(src_pixel, dst_pixel);
+            canvas[dst..dst + 4].copy_from_slice(&out);
         }
     }
 }

@@ -7,9 +7,37 @@ use webp_rust::decoder::vp8i::{ALPHA_FLAG, ANIMATION_FLAG};
 use webp_rust::decoder::WebpFormat;
 use webp_rust::decoder::{
     decode_animation_webp, decode_lossless_vp8l_to_rgba, decode_lossless_webp_to_rgba,
-    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_rgba,
+    decode_lossy_vp8_to_rgba, decode_lossy_webp_to_rgba, decode_lossy_webp_to_yuv,
 };
 use webp_rust::encoder::encode_lossless_rgba_to_vp8l;
+
+use std::fmt::Write as _;
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    fnv1a_extend(FNV_OFFSET, bytes)
+}
+
+fn fnv1a_extend(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+struct FnvWriter {
+    hash: u64,
+    len: usize,
+}
+
+impl std::fmt::Write for FnvWriter {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.hash = fnv1a_extend(self.hash, value.as_bytes());
+        self.len += value.len();
+        Ok(())
+    }
+}
 
 fn rgba_at(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;
@@ -193,6 +221,14 @@ fn parse_macroblock_data_reads_residual_coefficients() {
         .macroblocks
         .iter()
         .any(|mb| mb.non_zero_y != 0 || mb.non_zero_uv != 0));
+
+    let mut digest = FnvWriter {
+        hash: FNV_OFFSET,
+        len: 0,
+    };
+    write!(&mut digest, "{frame:?}").unwrap();
+    assert_eq!(digest.hash, 0x8791_7ea2_721e_93eb);
+    assert_eq!(digest.len, 11_297_890);
 }
 
 #[test]
@@ -298,6 +334,64 @@ fn decode_lossy_webp_to_rgba_applies_raw_alpha_chunk() {
         let expected = rgba_at(&base.rgba, base.width, x, y);
         assert_eq!(actual[0..3], expected[0..3]);
         assert_eq!(actual[3], expected_alpha);
+    }
+}
+
+#[test]
+fn decoder_outputs_match_pre_optimization_hashes() {
+    let sample = decode_lossy_webp_to_rgba(include_bytes!("../samples/sample.webp")).unwrap();
+    let sample_lossy =
+        decode_lossy_webp_to_rgba(include_bytes!("../samples/sample_lossy.webp")).unwrap();
+    let sample_lossless =
+        decode_lossless_webp_to_rgba(include_bytes!("../samples/sample_lossless.webp")).unwrap();
+    let sample_yuv = decode_lossy_webp_to_yuv(include_bytes!("../samples/sample.webp")).unwrap();
+    let alpha = make_alpha_plane(sample.width, sample.height);
+    let alpha_image = decode_lossy_webp_to_rgba(&make_lossy_alpha_still_webp(&alpha)).unwrap();
+    let animation =
+        decode_animation_webp(include_bytes!("../samples/sample_animation.webp")).unwrap();
+
+    assert_eq!(fnv1a(&sample.rgba), 1_696_054_643_894_815_793);
+    assert_eq!(fnv1a(&sample_lossy.rgba), 3_075_689_966_205_413_072);
+    assert_eq!(fnv1a(&sample_lossless.rgba), 1_696_054_643_894_815_793);
+    let mut yuv_hash = fnv1a(&sample_yuv.y);
+    yuv_hash = fnv1a_extend(yuv_hash, &sample_yuv.u);
+    yuv_hash = fnv1a_extend(yuv_hash, &sample_yuv.v);
+    yuv_hash = fnv1a_extend(yuv_hash, &sample_yuv.y_stride.to_le_bytes());
+    yuv_hash = fnv1a_extend(yuv_hash, &sample_yuv.uv_stride.to_le_bytes());
+    assert_eq!(yuv_hash, 12_095_117_868_605_958_766);
+    assert_eq!(fnv1a(&alpha_image.rgba), 15_885_283_038_402_686_189);
+    assert_eq!(
+        animation
+            .frames
+            .iter()
+            .map(|frame| fnv1a(&frame.rgba))
+            .collect::<Vec<_>>(),
+        [
+            9_289_231_258_251_332_586,
+            9_494_788_832_022_343_668,
+            6_631_290_322_722_517_797,
+        ]
+    );
+}
+
+#[test]
+fn optimized_decoders_reject_truncated_samples_without_panicking() {
+    let still_cases: &[&[u8]] = &[
+        include_bytes!("../samples/sample.webp"),
+        include_bytes!("../samples/sample_lossless.webp"),
+    ];
+    for data in still_cases {
+        for cut in [0, 1, 4, 11, data.len() / 2, data.len() - 1] {
+            assert!(webp_rust::decode(&data[..cut]).is_err(), "cut={cut}");
+        }
+    }
+
+    let animation = include_bytes!("../samples/sample_animation.webp");
+    for cut in [0, 1, 4, 11, animation.len() / 2, animation.len() - 1] {
+        assert!(
+            decode_animation_webp(&animation[..cut]).is_err(),
+            "cut={cut}"
+        );
     }
 }
 

@@ -366,6 +366,7 @@ fn parse_i4x4_mode(br: &mut Vp8BoolDecoder<'_>, top_mode: u8, left_mode: u8) -> 
     (-node) as u8
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn parse_intra_mode_row(
     br: &mut Vp8BoolDecoder<'_>,
     macroblock_width: usize,

@@ -115,6 +115,7 @@ fn encode_lossy_candidate(
 }
 
 /// Finalizes the lossy candidate by choosing the best filter configuration.
+#[allow(clippy::too_many_arguments)]
 fn finalize_lossy_candidate(
     width: usize,
     height: usize,
@@ -166,7 +167,7 @@ fn finalize_lossy_candidate(
     ))
 }
 
-fn prepare_lossy_color(rgba: &[u8], exact: bool, no_alpha: bool) -> Vec<u8> {
+fn prepare_lossy_color(rgba: &[u8], exact: bool, _no_alpha: bool) -> Vec<u8> {
     let mut color = rgba.to_vec();
     for pixel in color.chunks_exact_mut(4) {
         if !exact && pixel[3] == 0 {
@@ -174,11 +175,7 @@ fn prepare_lossy_color(rgba: &[u8], exact: bool, no_alpha: bool) -> Vec<u8> {
         }
         pixel[3] = 0xff;
     }
-    if no_alpha {
-        color
-    } else {
-        color
-    }
+    color
 }
 
 fn apply_near_lossless(rgba: &mut [u8], near_lossless: u8) {

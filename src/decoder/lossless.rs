@@ -1,7 +1,5 @@
 //! Lossless `VP8L` decode helpers.
 
-use std::collections::HashMap;
-
 use crate::decoder::header::parse_still_webp;
 use crate::decoder::lossy::DecodedImage;
 use crate::decoder::vp8::get_lossless_info;
@@ -37,16 +35,25 @@ const CODE_TO_PLANE: [u8; 120] = [
     0x7e, 0x61, 0x6f, 0x50, 0x71, 0x7f, 0x60, 0x70,
 ];
 const COLOR_CACHE_HASH_MUL: u32 = 0x1e35_a7bd;
+const HUFFMAN_ROOT_BITS: usize = 8;
+const HUFFMAN_SUBTABLE_FLAG: u32 = 1 << 31;
 
 #[derive(Debug, Clone)]
 struct LosslessBitReader<'a> {
     data: &'a [u8],
-    bit_pos: usize,
+    byte_pos: usize,
+    bit_buffer: u64,
+    bits_in_buffer: usize,
 }
 
 impl<'a> LosslessBitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, bit_pos: 0 }
+        Self {
+            data,
+            byte_pos: 0,
+            bit_buffer: 0,
+            bits_in_buffer: 0,
+        }
     }
 
     fn read_bit(&mut self) -> Result<u32, DecoderError> {
@@ -57,30 +64,54 @@ impl<'a> LosslessBitReader<'a> {
         if num_bits > 24 {
             return Err(DecoderError::InvalidParam("VP8L bit read is too wide"));
         }
-        let end = self
-            .bit_pos
-            .checked_add(num_bits)
-            .ok_or(DecoderError::Bitstream("VP8L bit position overflow"))?;
-        if end > self.data.len() * 8 {
+        let value = self.peek_bits(num_bits)?;
+        self.consume_bits(num_bits);
+        Ok(value)
+    }
+
+    fn remaining_bits(&self) -> usize {
+        self.bits_in_buffer.saturating_add(
+            self.data
+                .len()
+                .saturating_sub(self.byte_pos)
+                .saturating_mul(8),
+        )
+    }
+
+    fn ensure_bits(&mut self, num_bits: usize) -> Result<(), DecoderError> {
+        while self.bits_in_buffer < num_bits && self.byte_pos < self.data.len() {
+            self.bit_buffer |= u64::from(self.data[self.byte_pos]) << self.bits_in_buffer;
+            self.bits_in_buffer += 8;
+            self.byte_pos += 1;
+        }
+        if self.bits_in_buffer < num_bits {
             return Err(DecoderError::NotEnoughData("VP8L bitstream"));
         }
+        Ok(())
+    }
 
-        let mut value = 0u32;
-        for bit_index in 0..num_bits {
-            let stream_bit = self.bit_pos + bit_index;
-            let byte = self.data[stream_bit >> 3];
-            let bit = (byte >> (stream_bit & 7)) & 1;
-            value |= (bit as u32) << bit_index;
-        }
-        self.bit_pos = end;
-        Ok(value)
+    fn peek_bits(&mut self, num_bits: usize) -> Result<u32, DecoderError> {
+        self.ensure_bits(num_bits)?;
+        let mask = if num_bits == 0 {
+            0
+        } else {
+            (1u64 << num_bits) - 1
+        };
+        Ok((self.bit_buffer & mask) as u32)
+    }
+
+    fn consume_bits(&mut self, num_bits: usize) {
+        self.bit_buffer >>= num_bits;
+        self.bits_in_buffer -= num_bits;
     }
 }
 
 #[derive(Debug, Clone)]
 struct HuffmanTree {
     single_symbol: Option<u16>,
-    by_len: Vec<HashMap<u16, u16>>,
+    table: Vec<u32>,
+    codes_by_len: Vec<Vec<(u16, u16)>>,
+    root_bits: usize,
     max_len: usize,
 }
 
@@ -108,14 +139,16 @@ impl HuffmanTree {
         if num_symbols == 1 {
             return Ok(Self {
                 single_symbol,
-                by_len: Vec::new(),
+                table: Vec::new(),
+                codes_by_len: Vec::new(),
+                root_bits: 0,
                 max_len: 0,
             });
         }
 
         let mut left = 1i32;
-        for bits in 1..=MAX_ALLOWED_CODE_LENGTH {
-            left = (left << 1) - counts[bits];
+        for &count in counts.iter().skip(1) {
+            left = (left << 1) - count;
             if left < 0 {
                 return Err(DecoderError::Bitstream("oversubscribed VP8L Huffman tree"));
             }
@@ -131,9 +164,8 @@ impl HuffmanTree {
             next_code[bits] = code;
         }
 
-        let mut by_len = (0..=MAX_ALLOWED_CODE_LENGTH)
-            .map(|_| HashMap::new())
-            .collect::<Vec<_>>();
+        let mut codes_by_len = vec![Vec::new(); MAX_ALLOWED_CODE_LENGTH + 1];
+        let mut codes = Vec::with_capacity(num_symbols);
         let mut max_len = 0usize;
 
         for (symbol, &len) in code_lengths.iter().enumerate() {
@@ -143,13 +175,63 @@ impl HuffmanTree {
             }
             let canonical = next_code[bits];
             next_code[bits] += 1;
-            by_len[bits].insert(reverse_bits(canonical, bits), symbol as u16);
+            let reversed = reverse_bits(canonical, bits);
+            codes_by_len[bits].push((reversed, symbol as u16));
+            codes.push((reversed, symbol as u16, bits));
             max_len = max_len.max(bits);
+        }
+
+        let root_bits = max_len.min(HUFFMAN_ROOT_BITS);
+        let root_size = 1usize << root_bits;
+        let mut table = vec![0u32; root_size];
+        let root_mask = root_size - 1;
+        let mut subtable_bits = vec![0usize; root_size];
+
+        for &(code, _, bits) in &codes {
+            if bits > root_bits {
+                let prefix = usize::from(code) & root_mask;
+                subtable_bits[prefix] = subtable_bits[prefix].max(bits - root_bits);
+            }
+        }
+        for (prefix, &bits) in subtable_bits.iter().enumerate() {
+            if bits == 0 {
+                continue;
+            }
+            let offset = table.len();
+            if offset > 0x7f_ff_ff {
+                return Err(DecoderError::Bitstream("VP8L Huffman table is too large"));
+            }
+            table[prefix] = HUFFMAN_SUBTABLE_FLAG | ((offset as u32) << 8) | bits as u32;
+            table.resize(offset + (1usize << bits), 0);
+        }
+
+        for &(code, symbol, bits) in &codes {
+            let entry = (u32::from(symbol) << 8) | bits as u32;
+            if bits <= root_bits {
+                let suffix_bits = root_bits - bits;
+                for suffix in 0..(1usize << suffix_bits) {
+                    let index = usize::from(code) | (suffix << bits);
+                    table[index] = entry;
+                }
+            } else {
+                let prefix = usize::from(code) & root_mask;
+                let root_entry = table[prefix];
+                let offset = ((root_entry & !HUFFMAN_SUBTABLE_FLAG) >> 8) as usize;
+                let table_bits = (root_entry & 0xff) as usize;
+                let code_bits = bits - root_bits;
+                let code_suffix = usize::from(code) >> root_bits;
+                for suffix in 0..(1usize << (table_bits - code_bits)) {
+                    let index = offset + code_suffix + (suffix << code_bits);
+                    table[index] = entry;
+                }
+            }
         }
 
         Ok(Self {
             single_symbol: None,
-            by_len,
+            table,
+            codes_by_len,
+            root_bits,
             max_len,
         })
     }
@@ -159,11 +241,40 @@ impl HuffmanTree {
             return Ok(symbol);
         }
 
+        if br.remaining_bits() < self.root_bits {
+            return self.read_symbol_slow(br);
+        }
+
+        let root = br.peek_bits(self.root_bits)? as usize;
+        let mut entry = self.table[root];
+        if entry & HUFFMAN_SUBTABLE_FLAG != 0 {
+            let offset = ((entry & !HUFFMAN_SUBTABLE_FLAG) >> 8) as usize;
+            let subtable_bits = (entry & 0xff) as usize;
+            if br.remaining_bits() < self.root_bits + subtable_bits {
+                return self.read_symbol_slow(br);
+            }
+            let bits = br.peek_bits(self.root_bits + subtable_bits)? as usize;
+            let suffix = bits >> self.root_bits;
+            entry = self.table[offset + suffix];
+        }
+        if entry == 0 {
+            return Err(DecoderError::Bitstream("invalid VP8L Huffman symbol"));
+        }
+        let bits = (entry & 0xff) as usize;
+        let symbol = (entry >> 8) as u16;
+        br.consume_bits(bits);
+        Ok(symbol)
+    }
+
+    fn read_symbol_slow(&self, br: &mut LosslessBitReader<'_>) -> Result<u16, DecoderError> {
         let mut code = 0u16;
         for bits in 1..=self.max_len {
             code |= (br.read_bit()? as u16) << (bits - 1);
-            if let Some(&symbol) = self.by_len[bits].get(&code) {
-                return Ok(symbol);
+            if let Some((_, symbol)) = self.codes_by_len[bits]
+                .iter()
+                .find(|&&(candidate, _)| candidate == code)
+            {
+                return Ok(*symbol);
             }
         }
 
@@ -305,7 +416,7 @@ impl<'a> LosslessDecoder<'a> {
 
         if top_level {
             for transform in transforms.iter().rev() {
-                data = apply_inverse_transform(transform, &data)?;
+                apply_inverse_transform(transform, &mut data)?;
             }
         }
 
@@ -396,16 +507,16 @@ impl<'a> LosslessDecoder<'a> {
             let huffman_ysize = subsample_size(ysize, huffman_subsample_bits);
             let image = self.decode_image_stream(huffman_xsize, huffman_ysize, false)?;
 
-            let mut max_group = 0usize;
-            let raw_groups = image
+            let max_group = image
                 .iter()
                 .map(|&pixel| ((pixel >> 8) & 0xffff) as usize)
-                .inspect(|&group| max_group = max_group.max(group))
-                .collect::<Vec<_>>();
+                .max()
+                .unwrap_or(0);
             let mut mapping = vec![None; max_group + 1];
-            let mut dense_image = Vec::with_capacity(raw_groups.len());
+            let mut dense_image = Vec::with_capacity(image.len());
             let mut next_group = 0usize;
-            for group in raw_groups {
+            for pixel in image {
+                let group = ((pixel >> 8) & 0xffff) as usize;
                 let dense = if let Some(index) = mapping[group] {
                     index
                 } else {
@@ -578,6 +689,8 @@ impl<'a> LosslessDecoder<'a> {
             None
         };
         let mut pos = 0usize;
+        let mut x = 0usize;
+        let mut y = 0usize;
         let len_code_limit = NUM_LITERAL_CODES + NUM_LENGTH_CODES;
         let color_cache_limit = len_code_limit
             + if color_cache_bits > 0 {
@@ -587,8 +700,6 @@ impl<'a> LosslessDecoder<'a> {
             };
 
         while pos < data.len() {
-            let x = pos % width;
-            let y = pos / width;
             let group = &metadata.groups[metadata.group_index(x, y)];
             let code = group.green.read_symbol(&mut self.br)? as usize;
 
@@ -602,6 +713,11 @@ impl<'a> LosslessDecoder<'a> {
                     cache.insert(pixel);
                 }
                 pos += 1;
+                x += 1;
+                if x == width {
+                    x = 0;
+                    y += 1;
+                }
             } else if code < len_code_limit {
                 let length = get_copy_value(code - NUM_LITERAL_CODES, &mut self.br)?;
                 let dist_symbol = group.dist.read_symbol(&mut self.br)? as usize;
@@ -610,14 +726,18 @@ impl<'a> LosslessDecoder<'a> {
                 if dist > pos || pos + length > data.len() {
                     return Err(DecoderError::Bitstream("invalid VP8L backward reference"));
                 }
-                for i in 0..length {
-                    let pixel = data[pos + i - dist];
-                    data[pos + i] = pixel;
-                    if let Some(cache) = &mut color_cache {
+                if let Some(cache) = &mut color_cache {
+                    for i in 0..length {
+                        let pixel = data[pos + i - dist];
+                        data[pos + i] = pixel;
                         cache.insert(pixel);
                     }
+                } else {
+                    copy_backward_reference(&mut data, pos, dist, length);
                 }
                 pos += length;
+                y = pos / width;
+                x = pos - y * width;
             } else if code < color_cache_limit {
                 let key = code - len_code_limit;
                 let cache = color_cache
@@ -627,12 +747,29 @@ impl<'a> LosslessDecoder<'a> {
                 data[pos] = pixel;
                 cache.insert(pixel);
                 pos += 1;
+                x += 1;
+                if x == width {
+                    x = 0;
+                    y += 1;
+                }
             } else {
                 return Err(DecoderError::Bitstream("invalid VP8L green Huffman symbol"));
             }
         }
 
         Ok(data)
+    }
+}
+
+fn copy_backward_reference(data: &mut [u32], pos: usize, dist: usize, length: usize) {
+    debug_assert!(dist > 0 && dist <= pos && pos + length <= data.len());
+    let source = pos - dist;
+    let mut copied = 0usize;
+    while copied < length {
+        let available = dist + copied;
+        let chunk = available.min(length - copied);
+        data.copy_within(source..source + chunk, pos + copied);
+        copied += chunk;
     }
 }
 
@@ -777,17 +914,21 @@ fn expand_color_map(palette: &[u32], num_colors: usize, bits: usize) -> Vec<u32>
     expanded
 }
 
-fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u32>, DecoderError> {
+fn apply_inverse_transform(
+    transform: &Transform,
+    input: &mut Vec<u32>,
+) -> Result<(), DecoderError> {
     match transform.kind {
-        TransformType::SubtractGreen => Ok(input
-            .iter()
-            .map(|&argb| {
-                let green = (argb >> 8) & 0xff;
-                let red = (((argb >> 16) & 0xff) + green) & 0xff;
-                let blue = ((argb & 0xff) + green) & 0xff;
-                (argb & 0xff00_ff00) | (red << 16) | blue
-            })
-            .collect()),
+        TransformType::SubtractGreen => {
+            for argb in input {
+                let pixel = *argb;
+                let green = (pixel >> 8) & 0xff;
+                let red = (((pixel >> 16) & 0xff) + green) & 0xff;
+                let blue = ((pixel & 0xff) + green) & 0xff;
+                *argb = (pixel & 0xff00_ff00) | (red << 16) | blue;
+            }
+            Ok(())
+        }
         TransformType::CrossColor => {
             let expected_len = transform
                 .xsize
@@ -797,10 +938,10 @@ fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u
                 return Err(DecoderError::Bitstream("VP8L cross-color size mismatch"));
             }
             let tiles_per_row = subsample_size(transform.xsize, transform.bits);
-            let mut output = vec![0u32; input.len()];
             for y in 0..transform.ysize {
                 for x in 0..transform.xsize {
-                    let argb = input[y * transform.xsize + x];
+                    let index = y * transform.xsize + x;
+                    let argb = input[index];
                     let code = transform.data
                         [(y >> transform.bits) * tiles_per_row + (x >> transform.bits)];
                     let green_to_red = code as u8;
@@ -812,11 +953,10 @@ fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u
                     red = (red + color_transform_delta(green_to_red, green)) & 0xff;
                     blue = (blue + color_transform_delta(green_to_blue, green)) & 0xff;
                     blue = (blue + color_transform_delta(red_to_blue, red as u8)) & 0xff;
-                    output[y * transform.xsize + x] =
-                        (argb & 0xff00_ff00) | ((red as u32) << 16) | (blue as u32);
+                    input[index] = (argb & 0xff00_ff00) | ((red as u32) << 16) | (blue as u32);
                 }
             }
-            Ok(output)
+            Ok(())
         }
         TransformType::Predictor => {
             let expected_len = transform
@@ -827,26 +967,26 @@ fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u
                 return Err(DecoderError::Bitstream("VP8L predictor size mismatch"));
             }
             let tiles_per_row = subsample_size(transform.xsize, transform.bits);
-            let mut output = vec![0u32; input.len()];
             for y in 0..transform.ysize {
                 for x in 0..transform.xsize {
-                    let residual = input[y * transform.xsize + x];
+                    let index = y * transform.xsize + x;
+                    let residual = input[index];
                     let pred = if y == 0 {
                         if x == 0 {
                             ARGB_BLACK
                         } else {
-                            output[y * transform.xsize + x - 1]
+                            input[index - 1]
                         }
                     } else if x == 0 {
-                        output[(y - 1) * transform.xsize]
+                        input[index - transform.xsize]
                     } else {
-                        let left = output[y * transform.xsize + x - 1];
-                        let top = output[(y - 1) * transform.xsize + x];
-                        let top_left = output[(y - 1) * transform.xsize + x - 1];
+                        let left = input[index - 1];
+                        let top = input[index - transform.xsize];
+                        let top_left = input[index - transform.xsize - 1];
                         let top_right = if x + 1 < transform.xsize {
-                            output[(y - 1) * transform.xsize + x + 1]
+                            input[index - transform.xsize + 1]
                         } else {
-                            output[y * transform.xsize]
+                            input[index - x]
                         };
                         let mode = ((transform.data
                             [(y >> transform.bits) * tiles_per_row + (x >> transform.bits)]
@@ -854,10 +994,10 @@ fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u
                             & 0x0f) as u8;
                         predictor(mode, left, top, top_left, top_right)
                     };
-                    output[y * transform.xsize + x] = add_pixels(residual, pred);
+                    input[index] = add_pixels(residual, pred);
                 }
             }
-            Ok(output)
+            Ok(())
         }
         TransformType::ColorIndexing => {
             let reduced_width = subsample_size(transform.xsize, transform.bits);
@@ -871,35 +1011,35 @@ fn apply_inverse_transform(transform: &Transform, input: &[u32]) -> Result<Vec<u
             let bits_per_pixel = 8 >> transform.bits;
             let pixels_per_byte = 1usize << transform.bits;
             let bit_mask = (1u32 << bits_per_pixel) - 1;
-            let mut output = vec![0u32; transform.xsize * transform.ysize];
-
             if transform.bits == 0 {
-                for (dst, &src) in output.iter_mut().zip(input.iter()) {
-                    let index = ((src >> 8) & 0xff) as usize;
-                    *dst = transform.data.get(index).copied().unwrap_or(0);
+                for pixel in input {
+                    let index = ((*pixel >> 8) & 0xff) as usize;
+                    *pixel = transform.data.get(index).copied().unwrap_or(0);
                 }
-                return Ok(output);
+                return Ok(());
             }
 
-            for y in 0..transform.ysize {
-                let src_row = &input[y * reduced_width..(y + 1) * reduced_width];
-                let dst_row = &mut output[y * transform.xsize..(y + 1) * transform.xsize];
-                let mut x = 0usize;
-                for &packed in src_row {
+            input.resize(transform.xsize * transform.ysize, 0);
+            for y in (0..transform.ysize).rev() {
+                for packed_x in (0..reduced_width).rev() {
+                    let packed = input[y * reduced_width + packed_x];
                     let mut indices = (packed >> 8) & 0xff;
-                    for _ in 0..pixels_per_byte {
+                    let first_x = packed_x * pixels_per_byte;
+                    let count = pixels_per_byte.min(transform.xsize - first_x);
+                    for offset in 0..count {
+                        let x = first_x + offset;
                         if x >= transform.xsize {
                             break;
                         }
                         let index = (indices & bit_mask) as usize;
-                        dst_row[x] = transform.data.get(index).copied().unwrap_or(0);
+                        input[y * transform.xsize + x] =
+                            transform.data.get(index).copied().unwrap_or(0);
                         indices >>= bits_per_pixel;
-                        x += 1;
                     }
                 }
             }
 
-            Ok(output)
+            Ok(())
         }
     }
 }
@@ -965,3 +1105,7 @@ pub fn decode_lossless_webp_to_rgba(data: &[u8]) -> Result<DecodedImage, Decoder
     }
     decode_lossless_vp8l_to_rgba(parsed.image_data)
 }
+
+#[cfg(test)]
+#[path = "lossless_tests.rs"]
+mod tests;

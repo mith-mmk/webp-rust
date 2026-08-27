@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! Prediction, transform, and mode-evaluation helpers for lossy encoding.
 
 use super::bitstream::*;
@@ -148,8 +150,8 @@ pub(super) fn fill_prediction_block<const N: usize>(
             let top = top_samples::<N>(plane, stride, plane_width, x, y);
             let left = left_samples::<N>(plane, stride, x, y);
             let top_left = top_left_sample(plane, stride, x, y) as i32;
-            for row in 0..N {
-                let left_value = left[row] as i32;
+            for (row, &left_value) in left.iter().enumerate() {
+                let left_value = left_value as i32;
                 let offset = row * out_stride;
                 for col in 0..N {
                     out[offset + col] = clip_byte(left_value + top[col] as i32 - top_left);
@@ -1193,14 +1195,14 @@ pub(super) fn evaluate_luma4_mode(
     let mut tnz = top_context.nz & 0x0f;
     let mut lnz = left_context.nz & 0x0f;
 
-    for sub_y in 0..4 {
-        let mut left_mode = local_left[sub_y];
+    for (sub_y, left_slot) in local_left.iter_mut().enumerate() {
+        let mut left_mode = *left_slot;
         let mut l = lnz & 1;
-        for sub_x in 0..4 {
+        for (sub_x, top_slot) in local_top.iter_mut().enumerate() {
             let block = sub_y * 4 + sub_x;
             let block_x = x + sub_x * 4;
             let block_y = y + sub_y * 4;
-            let top_mode = local_top[sub_x];
+            let top_mode = *top_slot;
             let original = copy_block4(&reconstructed.y, reconstructed.y_stride, block_x, block_y);
             let ctx = (l + (tnz & 1)) as usize;
 
@@ -1305,14 +1307,14 @@ pub(super) fn evaluate_luma4_mode(
 
             sub_modes[block] = best_mode;
             total_score += best_score;
-            local_top[sub_x] = best_mode;
+            *top_slot = best_mode;
             left_mode = best_mode;
             l = best_non_zero;
             tnz = (tnz >> 1) | (best_non_zero << 7);
         }
         tnz >>= 4;
         lnz = (lnz >> 1) | (l << 7);
-        local_left[sub_y] = left_mode;
+        *left_slot = left_mode;
     }
 
     restore_block16(&mut reconstructed.y, reconstructed.y_stride, x, y, &backup);

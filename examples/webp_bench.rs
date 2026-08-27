@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Error as IoError, ErrorKind, Result as IoResult};
+use std::io::{Error as IoError, Result as IoResult};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -99,7 +99,7 @@ fn main() -> IoResult<()> {
             };
             let started = Instant::now();
             let encoded = encode_lossy_rgba_to_webp_with_config(width, height, &rgba, &config)
-                .map_err(|error| IoError::new(ErrorKind::Other, error.to_string()))?;
+                .map_err(|error| IoError::other(error.to_string()))?;
             if keep {
                 fs::write(root.join(format!("rust-{name}-{method}.webp")), &encoded)?;
             }

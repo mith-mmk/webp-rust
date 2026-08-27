@@ -264,7 +264,9 @@ fn read_le32(bytes: &[u8]) -> usize {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
 }
 
-fn scan_chunks<'a>(data: &'a [u8]) -> Result<Vec<([u8; 4], &'a [u8])>, DecoderError> {
+type ScannedChunk<'a> = ([u8; 4], &'a [u8]);
+
+fn scan_chunks(data: &[u8]) -> Result<Vec<ScannedChunk<'_>>, DecoderError> {
     if data.len() < 12 {
         return Err(DecoderError::NotEnoughData("RIFF header"));
     }

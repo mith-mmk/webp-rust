@@ -50,8 +50,8 @@ impl HuffmanCode {
         let single_symbol = (symbols.len() == 1).then_some(symbols[0]);
         if symbols.len() > 1 {
             let mut left = 1i32;
-            for bits in 1..=MAX_ALLOWED_CODE_LENGTH {
-                left = (left << 1) - counts[bits] as i32;
+            for &count in counts.iter().skip(1) {
+                left = (left << 1) - count as i32;
                 if left < 0 {
                     return Err(EncoderError::Bitstream("oversubscribed Huffman tree"));
                 }

@@ -153,9 +153,8 @@ pub(super) fn apply_cross_color_transform(
 
             let transformed_red =
                 ((red as i32 - color_transform_delta(transform.green_to_red, green)) & 0xff) as u32;
-            let mut transformed_blue = ((blue as i32
-                - color_transform_delta(transform.green_to_blue, green))
-                & 0xff) as i32;
+            let mut transformed_blue =
+                (blue as i32 - color_transform_delta(transform.green_to_blue, green)) & 0xff;
             transformed_blue =
                 (transformed_blue - color_transform_delta(transform.red_to_blue, red)) & 0xff;
 
