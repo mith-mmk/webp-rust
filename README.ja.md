@@ -1,4 +1,4 @@
-# webp-rust 0.3.0
+# webp-rust 0.3.1
 
 [English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
@@ -14,8 +14,16 @@ Pure Rust の WebP decoder / encoder です。
 - libwebp 互換の quality / method / filter / segment / sharp YUV /
   partition limit / near-lossless / alpha option
 - animation: RGBA frame sequence への compositing
-- library 出力: RGBA
+- library 出力: RGBA、および lower-level decoder API による VP8 の planar YUV420
 - BMP 出力: example のみ
+
+## 0.3.1 decoder 更新
+
+- VP8 は macroblock を行単位で再構成し、loop filter 用の小型 metadata だけを保持します。
+- VP8L は buffered bit reader、2段 Huffman table、in-place inverse transform、
+  重なり対応の chunk copy を使用します。
+- animation compositing に行コピーと透明・不透明 pixel の高速経路を追加しました。
+- 公開 decode API、RGBA/YUV 出力、error 動作、callback compatibility layer は変更していません。
 
 ## ライブラリ API
 
@@ -140,12 +148,15 @@ cargo test --tests
 cargo test --tests --features legacy
 cargo run --example webp_bench
 cargo run --example webp_compare
+cargo run --release --example webp_decode_bench -- --output target/webp_decode.csv
 ```
 
 `webp_bench` は一時 BMP/WebP を `.test-webp-bench` 配下だけに作成し、
 `PATH` 上の `cwebp` が利用できる場合は Rust encoder と比較します。
 `webp_compare` は lossless の `z_level` と lossy の quality/method について、
 画像ごとおよび平均の出力サイズ、圧縮率、RGB PSNR、エンコード時間をCSVで出力します。
+`webp_decode_bench` は VP8 RGBA、VP8 YUV、VP8L RGBA、animation 全体を7バッチで測定し、
+median、p95、MPixel/s をCSV出力します。
 
 ## 関連文書
 

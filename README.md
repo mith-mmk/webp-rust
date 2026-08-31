@@ -1,4 +1,4 @@
-# webp-rust 0.3.0
+# webp-rust 0.3.1
 
 [English](README.md) | [日本語](README.ja.md) | [Overview (JA)](OVERVIEW.ja.md)
 
@@ -12,8 +12,17 @@ Pure Rust WebP decoder and partial encoder.
 - Libwebp-style encode configuration for quality, method, filtering, segments,
   sharp YUV, partition limit, near-lossless, and alpha options
 - Animation: compositing to RGBA frame sequence
-- Library output: RGBA only
+- Library output: RGBA, plus planar YUV420 for VP8 through the lower-level decoder API
 - BMP output: example only
+
+## 0.3.1 decoder update
+
+- VP8 reconstructs macroblocks row by row and keeps only compact loop-filter metadata.
+- VP8L uses buffered bit reads, a two-level Huffman lookup table, in-place inverse
+  transforms, and chunked overlapping backward-reference copies.
+- Animation compositing has row-copy and transparent/opaque pixel fast paths.
+- Public decode APIs, decoded RGBA/YUV output, error behavior, and the callback-based
+  compatibility layer remain unchanged.
 
 ## Library API
 
@@ -142,6 +151,7 @@ cargo test --tests
 cargo test --tests --features legacy
 cargo run --example webp_bench
 cargo run --example webp_compare
+cargo run --release --example webp_decode_bench -- --output target/webp_decode.csv
 ```
 
 `webp_bench` writes temporary BMP/WebP files only below `.test-webp-bench`
@@ -149,6 +159,8 @@ and compares the Rust encoder with `cwebp` when it is available on `PATH`.
 `webp_compare` emits CSV rows for lossless `z_level` and lossy quality/method
 settings, including per-image and average compressed size, compression ratio,
 RGB PSNR, and encode time.
+`webp_decode_bench` measures VP8 RGBA, VP8 YUV, VP8L RGBA, and full animation
+decode in seven timed batches and writes median, p95, and MPixel/s values as CSV.
 
 ## License
 
