@@ -80,6 +80,26 @@ fn lossy_config_preserves_alpha_and_supports_no_alpha() {
 }
 
 #[test]
+fn lossy_config_preserves_chroma_saturation() {
+    let width = 16;
+    let height = 16;
+    let rgba = [0xff, 0x00, 0x00, 0xff].repeat(width * height);
+    let config = LossyEncodingConfig {
+        no_alpha: true,
+        ..LossyEncodingConfig::default()
+    };
+
+    let webp = encode_lossy_rgba_to_webp_with_config(width, height, &rgba, &config).unwrap();
+    let decoded = decode(&webp).unwrap();
+    for pixel in decoded.rgba.chunks_exact(4) {
+        assert!(
+            pixel[0] >= 0xf0 && pixel[1] <= 0x10 && pixel[2] <= 0x10,
+            "pixel: {pixel:?}"
+        );
+    }
+}
+
+#[test]
 fn lossy_config_validates_libwebp_option_ranges() {
     let rgba = sample_rgba(2, 2, false);
     let invalid = [

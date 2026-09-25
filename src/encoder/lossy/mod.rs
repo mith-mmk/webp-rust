@@ -494,18 +494,18 @@ fn rgb_to_y(r: u8, g: u8, b: u8) -> u8 {
 
 /// Clamps uv.
 fn clip_uv(value: i32, rounding: i32) -> u8 {
-    let uv = (value + rounding + (128 << (YUV_FIX + 2))) >> (YUV_FIX + 2);
+    let uv = (value + rounding + (128 << YUV_FIX)) >> YUV_FIX;
     uv.clamp(0, 255) as u8
 }
 
 /// Internal helper for rgb to u.
 fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
-    clip_uv(-9_719 * r - 19_081 * g + 28_800 * b, YUV_HALF << 2)
+    clip_uv(-9_719 * r - 19_081 * g + 28_800 * b, YUV_HALF)
 }
 
 /// Internal helper for rgb to v.
 fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
-    clip_uv(28_800 * r - 24_116 * g - 4_684 * b, YUV_HALF << 2)
+    clip_uv(28_800 * r - 24_116 * g - 4_684 * b, YUV_HALF)
 }
 
 /// Internal helper for rgba to yuv420.
