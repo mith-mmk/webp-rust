@@ -36,21 +36,22 @@ println!("{}x{}", image.width, image.height);
 Top-level still-image encode:
 
 ```rust
-let webp = webp_rust::encode(
-    &image,
-    2,
-    100,
-    webp_rust::WebpEncoding::Lossless,
-    None,
-)?;
-let lossy = webp_rust::encode_lossy(&image, 0, 90, None)?;
-let lossless = webp_rust::encode_lossless(&image, 2, None)?;
+let lossy_config = webp_rust::LossyEncodingConfig {
+    quality: 75.0,
+    method: 4,
+    ..Default::default()
+};
+let lossy = webp_rust::encode_lossy_with_config(&image, &lossy_config, None)?;
+
+let lossless_config = webp_rust::LosslessEncodingConfig { z_level: 6 };
+let lossless = webp_rust::encode_lossless_with_config(&image, &lossless_config, None)?;
 ```
 
 To embed raw EXIF metadata, pass the chunk payload directly:
 
 ```rust
-let webp = webp_rust::encode_lossless(&image, 2, Some(exif_bytes))?;
+let config = webp_rust::LosslessEncodingConfig { z_level: 6 };
+let webp = webp_rust::encode_lossless_with_config(&image, &config, Some(exif_bytes))?;
 ```
 
 Native file input:
@@ -66,22 +67,6 @@ For animation, use the decoder module directly:
 ```rust
 let animation = webp_rust::decoder::decode_animation_webp(&data)?;
 println!("{}", animation.frames.len());
-```
-
-The standard encoder API uses libwebp-style configuration objects:
-
-```rust
-let lossy_config = webp_rust::LossyEncodingConfig {
-    quality: 75.0,
-    method: 4,
-    ..Default::default()
-};
-let lossy = webp_rust::encode_lossy_with_config(&image, &lossy_config, Some(exif_bytes))?;
-
-let lossless_config = webp_rust::LosslessEncodingConfig {
-    z_level: 6,
-};
-let lossless = webp_rust::encode_lossless_with_config(&image, &lossless_config, Some(exif_bytes))?;
 ```
 
 `LossyEncodingConfig::preset(WebpPreset::Photo)` and the other stable presets
