@@ -454,7 +454,11 @@ pub fn parse_animation_webp(data: &[u8]) -> Result<ParsedAnimationWebp<'_>, Deco
         return Err(DecoderError::Unsupported("animated WebP flag is not set"));
     }
 
-    let anim_chunk = parse_chunk(data, offset, riff_limit)?;
+    let mut anim_chunk = parse_chunk(data, offset, riff_limit)?;
+    if &anim_chunk.fourcc == b"ICCP" {
+        offset += CHUNK_HEADER_SIZE + anim_chunk.padded_size;
+        anim_chunk = parse_chunk(data, offset, riff_limit)?;
+    }
     if &anim_chunk.fourcc != b"ANIM" {
         return Err(DecoderError::Bitstream("missing ANIM chunk"));
     }

@@ -13,7 +13,7 @@ use crate::encoder::vp8_bool_writer::Vp8BoolWriter;
 use crate::encoder::EncoderError;
 use crate::ImageBuffer;
 
-const MAX_WEBP_DIMENSION: usize = 1 << 14;
+const MAX_WEBP_DIMENSION: usize = (1 << 14) - 1;
 const MAX_PARTITION0_LENGTH: usize = (1 << 19) - 1;
 const YUV_FIX: i32 = 16;
 const YUV_HALF: i32 = 1 << (YUV_FIX - 1);

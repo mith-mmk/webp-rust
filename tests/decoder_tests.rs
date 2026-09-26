@@ -396,6 +396,23 @@ fn optimized_decoders_reject_truncated_samples_without_panicking() {
 }
 
 #[test]
+fn decode_rejects_truncated_vp8_tokens_with_consistent_riff_sizes() {
+    let mut data = include_bytes!("../samples/sample.webp").to_vec();
+    data.truncate(data.len() - 2_048);
+    let riff_size = (data.len() - 8) as u32;
+    let vp8_size = (data.len() - 20) as u32;
+    data[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    data[16..20].copy_from_slice(&vp8_size.to_le_bytes());
+
+    assert!(matches!(
+        webp_rust::decode(&data),
+        Err(webp_rust::DecoderError::NotEnoughData(
+            "VP8 token partition"
+        ))
+    ));
+}
+
+#[test]
 fn parse_animation_webp_reads_sample_animation_metadata() {
     let data = include_bytes!("../samples/sample_animation.webp");
 
@@ -415,6 +432,25 @@ fn parse_animation_webp_reads_sample_animation_metadata() {
         assert!(frame.x_offset + frame.width <= parsed.features.width);
         assert!(frame.y_offset + frame.height <= parsed.features.height);
     }
+}
+
+#[test]
+fn decode_animation_webp_accepts_iccp_before_anim() {
+    let rgba = [12, 34, 56, 255];
+    let vp8l = encode_lossless_rgba_to_vp8l(1, 1, &rgba).unwrap();
+    let vp8x = make_chunk(b"VP8X", &make_vp8x_payload(0x22, 1, 1));
+    let iccp = make_chunk(b"ICCP", &[1, 2, 3]);
+    let anim = make_chunk(b"ANIM", &[0, 0, 0, 0, 1, 0]);
+    let mut frame = vec![0; 16];
+    frame.extend_from_slice(&make_chunk(b"VP8L", &vp8l));
+    let webp = wrap_riff(&[vp8x, iccp, anim, make_chunk(b"ANMF", &frame)]);
+
+    let decoded = decode_animation_webp(&webp).unwrap();
+    assert_eq!(
+        (decoded.width, decoded.height, decoded.frames.len()),
+        (1, 1, 1)
+    );
+    assert_eq!(decoded.frames[0].rgba, rgba);
 }
 
 #[test]

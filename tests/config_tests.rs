@@ -1,7 +1,8 @@
 use webp_rust::decoder::{get_features, WebpFormat};
 use webp_rust::encoder::{
-    encode_lossless_rgba_to_webp_with_config, encode_lossy_rgba_to_webp_with_config, AlphaFilter,
-    LosslessEncodingConfig, LossyEncodingConfig, WebpPreset,
+    encode_lossless_rgba_to_webp_with_config, encode_lossy_rgba_to_vp8_with_config,
+    encode_lossy_rgba_to_webp_with_config, AlphaFilter, LosslessEncodingConfig,
+    LossyEncodingConfig, WebpPreset,
 };
 use webp_rust::{decode, EncoderError};
 
@@ -21,6 +22,24 @@ fn sample_rgba(width: usize, height: usize, alpha: bool) -> Vec<u8> {
         }
     }
     rgba
+}
+
+#[test]
+fn lossy_encoder_rejects_dimensions_exceeding_vp8_header() {
+    let rgba = vec![0xff; 16_384 * 4];
+    for (width, height) in [(16_384, 1), (1, 16_384)] {
+        assert!(matches!(
+            encode_lossy_rgba_to_vp8_with_config(
+                width,
+                height,
+                &rgba,
+                &LossyEncodingConfig::default()
+            ),
+            Err(EncoderError::InvalidParam(
+                "image dimensions exceed VP8 limits"
+            ))
+        ));
+    }
 }
 
 #[test]

@@ -383,9 +383,11 @@ fn parse_token_partitions(
     let mut size_left = data.len() - size_bytes;
     for chunk in data[..size_bytes].chunks_exact(3) {
         let stored = chunk[0] as usize | ((chunk[1] as usize) << 8) | ((chunk[2] as usize) << 16);
-        let actual = stored.min(size_left);
-        partitions.push(actual);
-        size_left -= actual;
+        if stored > size_left {
+            return Err(DecoderError::NotEnoughData("VP8 token partition"));
+        }
+        partitions.push(stored);
+        size_left -= stored;
     }
     partitions.push(size_left);
 
@@ -845,6 +847,7 @@ impl<'a> MacroBlockRows<'a> {
         let mut left_context = NonZeroContext::default();
         let mut macroblocks = Vec::with_capacity(self.frame.macroblock_width);
         for (mb_x, header) in row.into_iter().enumerate() {
+            let reads_tokens = !header.skip;
             let mb = parse_residuals(
                 header,
                 &mut self.top_contexts[mb_x],
@@ -853,6 +856,9 @@ impl<'a> MacroBlockRows<'a> {
                 &self.frame.quantization,
                 &self.probabilities,
             );
+            if reads_tokens && token_br.eof() {
+                return Err(DecoderError::NotEnoughData("VP8 token partition"));
+            }
             macroblocks.push(mb);
         }
         self.next_mb_y += 1;
@@ -868,4 +874,25 @@ pub fn parse_macroblock_data(data: &[u8]) -> Result<MacroBlockDataFrame, Decoder
         macroblocks.extend(row);
     }
     Ok(MacroBlockDataFrame { frame, macroblocks })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_token_partitions, Vp8BoolDecoder};
+    use crate::decoder::DecoderError;
+
+    #[test]
+    fn token_partition_sizes_must_fit_available_data() {
+        let mut br = Vp8BoolDecoder::new(&[0x40]);
+        assert_eq!(
+            parse_token_partitions(&mut br, &[3, 0, 0, 0xaa]),
+            Err(DecoderError::NotEnoughData("VP8 token partition"))
+        );
+
+        let mut br = Vp8BoolDecoder::new(&[0x40]);
+        assert_eq!(
+            parse_token_partitions(&mut br, &[3, 0, 0, 1, 2, 3, 4, 5]),
+            Ok(vec![3, 2])
+        );
+    }
 }

@@ -1,4 +1,4 @@
-# webp-rust 0.3.1
+# webp-rust 0.3.2
 
 [English](README.md) | [日本語](README.ja.md) | [Overview (JA)](OVERVIEW.ja.md)
 
@@ -14,6 +14,13 @@ Pure Rust WebP decoder and partial encoder.
 - Animation: compositing to RGBA frame sequence
 - Library output: RGBA, plus planar YUV420 for VP8 through the lower-level decoder API
 - BMP output: example only
+
+## 0.3.2 fixes
+
+- Animated WebP decoding accepts an `ICCP` chunk between `VP8X` and `ANIM`.
+- VP8 decoding rejects token partitions whose declared sizes exceed the available data
+  and reports truncated token data instead of decoding with implicit padding.
+- Lossy encoding rejects dimensions above the 14-bit VP8 limit of 16,383 pixels.
 
 ## 0.3.1 decoder update
 
