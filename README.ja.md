@@ -17,19 +17,21 @@ Pure Rust の WebP decoder / encoder です。
 - library 出力: RGBA、および lower-level decoder API による VP8 の planar YUV420
 - BMP 出力: example のみ
 
-## 0.4.0 dependency compatibility
+## 0.4.0 依存関係の互換性
 
-- Updated `bin-rs` from `0.0.10` to `0.0.11` for its reader fixes.
-- This is a breaking dependency-type change: `compat::decode`, `read_header`,
-  and `read_u24` now accept the `bin-rs 0.0.11` `BinaryReader` trait.
-  Callers passing readers from `bin-rs 0.0.10` must update their direct
-  dependency to `0.0.11` together with `webp-rust` to `0.4`.
-  Cargo treats `0.0.10` and `0.0.11` as incompatible versions, so their
-  reader types cannot be mixed at these public API boundaries.
-- Byte-slice encode/decode APIs, animation callbacks, and Abort handling
-  are unchanged. The `legacy` feature remains opt-in.
-- The `0.4.0` version keeps existing `webp-rust = "0.3.2"` consumers on
-  the compatible `0.3.x` series rather than silently changing their reader types.
+- reader の修正を取り込むため、`bin-rs` を `0.0.10` から `0.0.11` へ更新しました。
+- 公開 API の依存型に互換性のない変更があります。`compat::decode`、`read_header`、
+  `read_u24` は `bin-rs 0.0.11` の `BinaryReader` trait を受け取ります。
+  `bin-rs 0.0.10` の reader を渡している利用側は、`webp-rust` を `0.4` へ更新する際に、
+  直接依存の `bin-rs` も `0.0.11` へ更新してください。
+  Cargo は `0.0.10` と `0.0.11` を互換性のない版として扱うため、これらの reader 型を
+  公開 API の境界で混在させることはできません。
+- byte slice の encode/decode API、animation callback、Abort 処理は変更していません。
+  `legacy` feature は引き続き明示的な有効化が必要です。
+- bin-rs reader 経由の EOF 診断などは更新先の仕様に従います。
+  詳細は [bin-rs 0.0.11 の変更履歴](https://github.com/mith-mmk/bin-rs/blob/c9ea99a555b8650e9ba75bcd5fe632a15d57777c/CHANGELOG.md) を参照してください。
+- `0.4.0` とすることで、既存の `webp-rust = "0.3.2"` 利用側は互換性のある `0.3.x` 系列に
+  留まり、reader 型が自動更新で変わることを防ぎます。
 
 ## 0.3.2 修正
 
