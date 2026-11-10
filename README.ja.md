@@ -1,4 +1,4 @@
-# webp-rust 0.3.2
+# webp-rust 0.4.0
 
 [English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
@@ -16,6 +16,20 @@ Pure Rust の WebP decoder / encoder です。
 - animation: RGBA frame sequence への compositing
 - library 出力: RGBA、および lower-level decoder API による VP8 の planar YUV420
 - BMP 出力: example のみ
+
+## 0.4.0 dependency compatibility
+
+- Updated `bin-rs` from `0.0.10` to `0.0.11` for its reader fixes.
+- This is a breaking dependency-type change: `compat::decode`, `read_header`,
+  and `read_u24` now accept the `bin-rs 0.0.11` `BinaryReader` trait.
+  Callers passing readers from `bin-rs 0.0.10` must update their direct
+  dependency to `0.0.11` together with `webp-rust` to `0.4`.
+  Cargo treats `0.0.10` and `0.0.11` as incompatible versions, so their
+  reader types cannot be mixed at these public API boundaries.
+- Byte-slice encode/decode APIs, animation callbacks, and Abort handling
+  are unchanged. The `legacy` feature remains opt-in.
+- The `0.4.0` version keeps existing `webp-rust = "0.3.2"` consumers on
+  the compatible `0.3.x` series rather than silently changing their reader types.
 
 ## 0.3.2 修正
 
@@ -81,7 +95,7 @@ println!("{}", animation.frames.len());
 旧 `optimization_level` API は opt-in の Cargo feature に分離されています。
 
 ```toml
-webp-rust = { version = "0.3", features = ["legacy"] }
+webp-rust = { version = "0.4", features = ["legacy"] }
 ```
 
 `legacy` は既定無効です。animation encode は未実装です。
