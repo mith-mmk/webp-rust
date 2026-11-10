@@ -1,4 +1,4 @@
-# webp-rust 0.3.2
+# webp-rust 0.4.0
 
 [English](README.md) | [日本語](README.ja.md) | [Overview (JA)](OVERVIEW.ja.md)
 
@@ -14,6 +14,22 @@ Pure Rust WebP decoder and partial encoder.
 - Animation: compositing to RGBA frame sequence
 - Library output: RGBA, plus planar YUV420 for VP8 through the lower-level decoder API
 - BMP output: example only
+
+## 0.4.0 dependency compatibility
+
+- Updated `bin-rs` from `0.0.10` to `0.0.11` for its reader fixes.
+- This is a breaking dependency-type change: `compat::decode`, `read_header`,
+  and `read_u24` now accept the `bin-rs 0.0.11` `BinaryReader` trait.
+  Callers passing readers from `bin-rs 0.0.10` must update their direct
+  dependency to `0.0.11` together with `webp-rust` to `0.4`.
+  Cargo treats `0.0.10` and `0.0.11` as incompatible versions, so their
+  reader types cannot be mixed at these public API boundaries.
+- Byte-slice encode/decode APIs, animation callbacks, and Abort handling
+  are unchanged. The `legacy` feature remains opt-in.
+- EOF diagnostics and other bin-rs reader behavior follow the updated dependency.
+  See the [bin-rs 0.0.11 changelog](https://github.com/mith-mmk/bin-rs/blob/c9ea99a555b8650e9ba75bcd5fe632a15d57777c/CHANGELOG.md).
+- The `0.4.0` version keeps existing `webp-rust = "0.3.2"` consumers on
+  the compatible `0.3.x` series rather than silently changing their reader types.
 
 ## 0.3.2 fixes
 
@@ -83,7 +99,7 @@ guaranteed to match a particular libwebp release.
 The old `optimization_level` API is isolated behind the opt-in Cargo feature:
 
 ```toml
-webp-rust = { version = "0.3", features = ["legacy"] }
+webp-rust = { version = "0.4", features = ["legacy"] }
 ```
 
 The legacy feature is disabled by default. Animated encode is not implemented.

@@ -1,21 +1,23 @@
-use bin_rs::reader::BytesReader;
+use bin_rs::reader::{BinaryReader, BytesReader, StreamReader};
 use std::collections::HashMap;
+use std::io::{BufReader, Cursor};
 use webp_rust::compat::{
     self, CallbackResponse, DataMap, DecodeOptions, DrawCallback, DrawOptions, InitOptions,
-    NextOptions, ResponseCommand, TerminateOptions, VerboseOptions, RGBA,
+    NextOptions, TerminateOptions, VerboseOptions, RGBA,
 };
 use webp_rust::decoder::{get_features, parse_animation_webp};
 use webp_rust::{read_header, read_u24, AnimationControl, AnimationFrame, ImageBuffer, WebpHeader};
 
 type Error = Box<dyn std::error::Error>;
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct RecordingDrawer {
     init: Option<(usize, usize, InitOptions)>,
     draws: Vec<(usize, usize, usize, usize, Vec<u8>)>,
     nexts: Vec<NextOptions>,
     metadata: HashMap<String, DataMap>,
     terminated: bool,
+    abort_at_next: Option<usize>,
 }
 
 impl DrawCallback for RecordingDrawer {
@@ -53,8 +55,10 @@ impl DrawCallback for RecordingDrawer {
 
     fn next(&mut self, next: Option<NextOptions>) -> Result<Option<CallbackResponse>, Error> {
         self.nexts.push(next.expect("next options"));
-        Ok(Some(CallbackResponse {
-            response: ResponseCommand::Continue,
+        Ok(Some(if self.abort_at_next == Some(self.nexts.len()) {
+            CallbackResponse::abort()
+        } else {
+            CallbackResponse::cont()
         }))
     }
 
@@ -178,4 +182,71 @@ fn compat_decode_decodes_animation_via_callback_api() {
     );
     assert!(drawer.draws.len() >= parsed.frames.len());
     assert!(drawer.terminated);
+}
+
+fn record_decode<B: BinaryReader>(reader: &mut B, abort_at_next: Option<usize>) -> RecordingDrawer {
+    let mut drawer = RecordingDrawer {
+        abort_at_next,
+        ..Default::default()
+    };
+    compat::decode(reader, &mut DecodeOptions::new(&mut drawer)).unwrap();
+    drawer
+}
+
+#[test]
+fn compat_stream_readers_match_bytes_with_small_and_default_buffers() {
+    for data in [
+        include_bytes!("../samples/sample_lossy.webp").as_slice(),
+        include_bytes!("../samples/sample_lossless.webp").as_slice(),
+        include_bytes!("../samples/sample_animation.webp").as_slice(),
+    ] {
+        let expected = record_decode(&mut BytesReader::new(data), None);
+        for capacity in [1, 8, 16] {
+            let mut reader =
+                StreamReader::new(BufReader::with_capacity(capacity, Cursor::new(data)));
+            assert_eq!(
+                record_decode(&mut reader, None),
+                expected,
+                "capacity {capacity}"
+            );
+            assert_eq!(reader.offset().unwrap(), data.len() as u64);
+        }
+        let mut reader = StreamReader::new(BufReader::new(Cursor::new(data)));
+        assert_eq!(record_decode(&mut reader, None), expected);
+        assert_eq!(reader.offset().unwrap(), data.len() as u64);
+    }
+}
+
+#[test]
+fn compat_stream_animation_preserves_abort_callbacks() {
+    let data = include_bytes!("../samples/sample_animation.webp").as_slice();
+    assert!(parse_animation_webp(data).unwrap().frames.len() >= 2);
+    for abort_at in [1, 2] {
+        let expected = record_decode(&mut BytesReader::new(data), Some(abort_at));
+        assert_eq!(expected.nexts.len(), abort_at);
+        assert_eq!(expected.draws.len(), if abort_at == 1 { 1 } else { 2 });
+        assert!(expected.terminated);
+        assert!(!expected.metadata.is_empty());
+        for capacity in [1, 8, 16, 8192] {
+            let mut reader =
+                StreamReader::new(BufReader::with_capacity(capacity, Cursor::new(data)));
+            assert_eq!(record_decode(&mut reader, Some(abort_at)), expected);
+        }
+    }
+}
+
+#[test]
+fn compat_stream_rejects_truncated_headers_and_payloads_before_callbacks() {
+    let data = include_bytes!("../samples/sample_lossy.webp").as_slice();
+    for length in [0, 4, 11, 12, data.len() - 1] {
+        for capacity in [1, 8, 16, 8192] {
+            let mut reader = StreamReader::new(BufReader::with_capacity(
+                capacity,
+                Cursor::new(&data[..length]),
+            ));
+            let mut drawer = RecordingDrawer::default();
+            assert!(compat::decode(&mut reader, &mut DecodeOptions::new(&mut drawer)).is_err());
+            assert_eq!(drawer, RecordingDrawer::default());
+        }
+    }
 }

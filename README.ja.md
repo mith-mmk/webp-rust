@@ -1,4 +1,4 @@
-# webp-rust 0.3.2
+# webp-rust 0.4.0
 
 [English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
@@ -16,6 +16,22 @@ Pure Rust の WebP decoder / encoder です。
 - animation: RGBA frame sequence への compositing
 - library 出力: RGBA、および lower-level decoder API による VP8 の planar YUV420
 - BMP 出力: example のみ
+
+## 0.4.0 依存関係の互換性
+
+- reader の修正を取り込むため、`bin-rs` を `0.0.10` から `0.0.11` へ更新しました。
+- 公開 API の依存型に互換性のない変更があります。`compat::decode`、`read_header`、
+  `read_u24` は `bin-rs 0.0.11` の `BinaryReader` trait を受け取ります。
+  `bin-rs 0.0.10` の reader を渡している利用側は、`webp-rust` を `0.4` へ更新する際に、
+  直接依存の `bin-rs` も `0.0.11` へ更新してください。
+  Cargo は `0.0.10` と `0.0.11` を互換性のない版として扱うため、これらの reader 型を
+  公開 API の境界で混在させることはできません。
+- byte slice の encode/decode API、animation callback、Abort 処理は変更していません。
+  `legacy` feature は引き続き明示的な有効化が必要です。
+- bin-rs reader 経由の EOF 診断などは更新先の仕様に従います。
+  詳細は [bin-rs 0.0.11 の変更履歴](https://github.com/mith-mmk/bin-rs/blob/c9ea99a555b8650e9ba75bcd5fe632a15d57777c/CHANGELOG.md) を参照してください。
+- `0.4.0` とすることで、既存の `webp-rust = "0.3.2"` 利用側は互換性のある `0.3.x` 系列に
+  留まり、reader 型が自動更新で変わることを防ぎます。
 
 ## 0.3.2 修正
 
@@ -81,7 +97,7 @@ println!("{}", animation.frames.len());
 旧 `optimization_level` API は opt-in の Cargo feature に分離されています。
 
 ```toml
-webp-rust = { version = "0.3", features = ["legacy"] }
+webp-rust = { version = "0.4", features = ["legacy"] }
 ```
 
 `legacy` は既定無効です。animation encode は未実装です。
