@@ -1,6 +1,6 @@
 [package]
 name = "webp-rust"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Pure Rust implementation of a WebP encoder and decoder"
 keywords =  ["webp", "image", "encoder", "codec", "compression"]
@@ -20,7 +20,7 @@ legacy = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bin-rs = {version = "0.0.11",features = ["stream","util"]}
+bin-rs = {version = "0.1.0",features = ["stream","util"]}
 
 
 [profile.release]

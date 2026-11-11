@@ -1,4 +1,4 @@
-# webp-rust 0.4.0
+# webp-rust 0.5.0
 
 [English](README.md) | [日本語](README.ja.md) | [実装概要](OVERVIEW.ja.md)
 
@@ -16,6 +16,18 @@ Pure Rust の WebP decoder / encoder です。
 - animation: RGBA frame sequence への compositing
 - library 出力: RGBA、および lower-level decoder API による VP8 の planar YUV420
 - BMP 出力: example のみ
+
+## 0.5.0 依存関係の互換性
+
+- `bin-rs` を `0.0.11` から `0.1.0` へ更新しました。`stream` と `util` feature は維持します。
+- 公開 API の依存型に互換性のない変更があります。`compat::decode`、`read_header`、
+  `read_u24` は `bin-rs 0.1` の `BinaryReader` trait を受け取ります。
+  旧版の reader を渡している利用側は、`webp-rust = "0.5"` への更新と同時に
+  直接依存も `bin-rs = "0.1"` へ更新してください。Cargo は両版を互換性のない
+  依存関係として扱うため、これらの公開 API で reader 型を混在させることはできません。
+- codec 実装や byte slice API の変更はありません。animation callback、Abort 処理、
+  opt-in の `legacy` feature は変更していません。reader の挙動は `bin-rs 0.1.0` の仕様に従います。
+- `0.5.0` とすることで、`webp-rust = "0.4"` の利用側は `0.4.x` 系列に留まります。
 
 ## 0.4.0 依存関係の互換性
 
